@@ -597,7 +597,7 @@ class TradingEngine:
             target_asset = asset
             payout = 86.0
 
-        # FILTRO DE SEGURIDAD INTELIGENTE: Evaluar la vela de cierre
+        # FILTRO DE SEGURIDAD ESTRICTO: Evaluar la vela cerrada que causó la pérdida
         df_1m = self._fetch_asset_candles(target_asset, count=40, timeframe_sec=60)
         eval_1m = self.ensemble.evaluate(df_1m)
         votes = eval_1m.get("votes", {})
@@ -605,26 +605,47 @@ class TradingEngine:
         st_vote = votes.get("SuperTrend Volatility", 0.0)
         ema_vote = votes.get("Triple EMA Ribbon", 0.0)
         
-        # Si la orden original fue CALL pero el mercado rompió hacia abajo (SuperTrend y EMA negativos):
-        # O si fue PUT pero el mercado rompió hacia arriba (SuperTrend y EMA positivos):
-        has_breakout_against = (action == "CALL" and st_vote < 0 and ema_vote < 0) or \
-                               (action == "PUT" and st_vote > 0 and ema_vote > 0)
+        opposite_action = "PUT" if action == "CALL" else "CALL"
+        fav_orig = sum(1 for v in votes.values() if (action == "CALL" and v > 0) or (action == "PUT" and v < 0))
+        fav_opp = sum(1 for v in votes.values() if (opposite_action == "CALL" and v > 0) or (opposite_action == "PUT" and v < 0))
         
         m_key = base_asset if base_asset in self.martingale_state else asset
-        
-        if has_breakout_against:
-            print(f"\n>> 🛡️🛑 [MARTINGALA ABORTADA POR SEGURIDAD] {target_asset}: Rompimiento violento en contra detectado (SuperTrend/EMA en contra). Se cancela la reentrada G{next_level} para evitar pérdidas en cascada.")
+
+        # CONDICIÓN DE VETO ESTRICTA:
+        # 1. Si la vela rompió violentamente en contra (SuperTrend o EMA invertidos)
+        # 2. O si menos de 6 de las 10 estrategias apoyan la dirección de recuperación
+        # ABORTAR DE INMEDIATO para evitar quemar capital contra la tendencia
+        has_breakout_against = (action == "CALL" and (st_vote < 0 or ema_vote < 0)) or \
+                               (action == "PUT" and (st_vote > 0 or ema_vote > 0))
+
+        # Caso A: El mercado giró de forma contundente (>= 7 estrategias y prob >= 80% en dirección opuesta)
+        can_adapt = (fav_opp >= 7 and eval_1m["dominant_probability"] >= 80.0 and eval_1m["dominant_action"] == opposite_action)
+
+        if has_breakout_against and not can_adapt:
+            print(f"\n>> 🛡️🛑 [MARTINGALA ABORTADA POR SEGURIDAD] {target_asset}: Rompimiento violento en contra detectado. Solo {fav_orig}/10 estrategias a favor. Reentrada G{next_level} cancelada para proteger capital.")
             if m_key in self.martingale_state:
                 self.martingale_state[m_key]["current_level"] = 0
                 self.martingale_state[m_key]["next_amount"] = self.config.amount
                 self.martingale_state[m_key]["immediate_reentry"] = False
             return False
 
-        # Si el mercado giró con alta probabilidad en la dirección opuesta, adaptar dirección
-        recov_action = action
-        if eval_1m["dominant_probability"] >= 78.0 and eval_1m["dominant_action"] in ["CALL", "PUT"] and eval_1m["dominant_action"] != action:
-            recov_action = eval_1m["dominant_action"]
-            print(f">> 🔄 [MARTINGALA ADAPTATIVA] {target_asset}: El mercado se alineó a {recov_action} ({eval_1m['dominant_probability']:.1f}%). Reentrada adaptada a la dirección dominante.")
+        if fav_orig < 6 and not can_adapt:
+            print(f"\n>> 🛡️🛑 [MARTINGALA ABORTADA POR SEGURIDAD] {target_asset}: Consenso insuficiente ({fav_orig}/10 estrategias a favor). Reentrada G{next_level} cancelada para evitar pérdida consecutiva.")
+            if m_key in self.martingale_state:
+                self.martingale_state[m_key]["current_level"] = 0
+                self.martingale_state[m_key]["next_amount"] = self.config.amount
+                self.martingale_state[m_key]["immediate_reentry"] = False
+            return False
+
+        if can_adapt:
+            recov_action = opposite_action
+            count_fav = fav_opp
+            recov_prob = eval_1m["dominant_probability"]
+            print(f">> 🔄 [MARTINGALA ADAPTATIVA] {target_asset}: Mercado volcado a {recov_action} ({fav_opp}/10 a favor | {recov_prob:.1f}%). Reentrada adaptada a la nueva dirección.")
+        else:
+            recov_action = action
+            count_fav = fav_orig
+            recov_prob = eval_1m["prob_call"] if action == "CALL" else eval_1m["prob_put"]
 
         trade_uid = str(uuid.uuid4())[:12]
         expiration_min = 1
@@ -638,7 +659,7 @@ class TradingEngine:
                     self.iq.change_balance(target_mode)
                     time.sleep(0.3)
 
-                print(f"\n>> ⚡⚡ [REENTRADA INTELIGENTE G{next_level}] #{trade_uid} | {recov_action} en {target_asset} ({target_mode}) | Importe: ${amount:.2f} | Payout: {payout:.0f}%")
+                print(f"\n>> ⚡⚡ [REENTRADA INTELIGENTE G{next_level}] #{trade_uid} | {recov_action} en {target_asset} ({target_mode}) | Importe: ${amount:.2f} ({count_fav}/10 a favor) | Payout: {payout:.0f}%")
                 status, order_id = self.iq.buy(amount, target_asset, recov_action.lower(), expiration_min)
 
                 if not status or not isinstance(order_id, int):
@@ -651,7 +672,7 @@ class TradingEngine:
                 print(f">> [ERROR IQ OPTION] Fallo enviando orden de recuperación para {target_asset}: {e}")
                 return False
         else:
-            print(f"\n>> 🔥⚡ [SIMULADOR LOCAL - REENTRADA G{next_level}] #{trade_uid} | {recov_action} en {asset} | Importe: ${amount:.2f} | Payout: {payout:.0f}%\n")
+            print(f"\n>> 🔥⚡ [SIMULADOR LOCAL - REENTRADA G{next_level}] #{trade_uid} | {recov_action} en {asset} | Importe: ${amount:.2f} ({count_fav}/10 a favor) | Payout: {payout:.0f}%\n")
 
         # Conteo real de estrategias a favor
         count_fav = sum(1 for v in votes.values() if (recov_action == "CALL" and v > 0) or (recov_action == "PUT" and v < 0))
@@ -811,15 +832,18 @@ class TradingEngine:
                     self.martingale_state[m_key]["immediate_reentry"] = False
                 elif res == "LOSS":
                     if self.config.use_martingale:
-                        if current_lvl < self.config.martingale_levels:
+                        # Límite estricto de seguridad: Máximo 1 nivel de recuperación (G1: x2 max)
+                        # Prohibido absolutamente escaladas suicidas a G2 o G3 que quemen el balance
+                        max_allowed_lvl = min(1, max(1, self.config.martingale_levels))
+                        if current_lvl < max_allowed_lvl:
                             next_lvl = current_lvl + 1
                             recov_amount = round(amount * self.config.martingale_multiplier, 2)
                             self.martingale_state[m_key]["current_level"] = next_lvl
                             self.martingale_state[m_key]["next_amount"] = recov_amount
                             self.martingale_state[m_key]["immediate_reentry"] = True
                             self.martingale_state[m_key]["last_action"] = action
-                            print(f">> ⚡ [MARTINGALA G{next_lvl}] Operación perdida en {m_key}. Disparando reentrada INMEDIATA de recuperación con ${recov_amount:.2f} (x{self.config.martingale_multiplier})...")
-                            # Ejecución instantánea sin esperar a la ventana de 58s de vela
+                            print(f">> ⚡ [MARTINGALA G{next_lvl}] Operación inicial cerrada en LOSS en {m_key}. Evaluando reentrada segura con ${recov_amount:.2f} (x2.0)...")
+                            # Ejecución instantánea con validación rigurosa de consenso
                             self._execute_martingale_recovery(
                                 asset=asset,
                                 base_asset=base_asset,
@@ -828,7 +852,7 @@ class TradingEngine:
                                 next_level=next_lvl
                             )
                         else:
-                            print(f">> 🛑 [MARTINGALA FINALIZADA] {m_key} agotó las {self.config.martingale_levels} reentradas permitidas. Reseteando a importe base ${self.config.amount:.2f}.")
+                            print(f">> 🛑 [MARTINGALA FINALIZADA] {m_key} completó la reentrada permitida (G{max_allowed_lvl}). Reseteando a importe base ${self.config.amount:.2f}.")
                             self.martingale_state[m_key]["current_level"] = 0
                             self.martingale_state[m_key]["next_amount"] = self.config.amount
                             self.martingale_state[m_key]["immediate_reentry"] = False
@@ -845,8 +869,8 @@ class TradingEngine:
         self.current_state["status"] = "RUNNING"
         self._connect_iq()
 
-        # Auto-descubrimiento inicial autónomo de los 15 a 25 mejores pares abiertos
-        self._auto_discover_top_assets(min_count=15, max_count=25, silent=False)
+        # Auto-descubrimiento inicial autónomo de los 8 a 12 mejores pares con mayor Payout (>=82%)
+        self._auto_discover_top_assets(min_count=8, max_count=12, silent=False)
 
         while self.is_running:
             try:
@@ -886,9 +910,9 @@ class TradingEngine:
                 if not self.config.use_simulator and self.iq and int(now_ts) % 4 == 0:
                     self._sync_iq_balance()
 
-                # Rotación y vigilancia continua de cartera autónoma cada 45s
+                # Rotación y vigilancia continua de cartera autónoma cada 45s (8 a 12 mejores pares)
                 if not self.config.use_simulator and self.iq and int(now_ts) % 45 == 0:
-                    self._auto_discover_top_assets(min_count=15, max_count=25, silent=True)
+                    self._auto_discover_top_assets(min_count=8, max_count=12, silent=True)
                 
                 # ESCANEO CONTINUO DE LOS ACTIVOS AUTÓNOMAMENTE ASIGNADOS
                 qualified_candidates = []
@@ -988,39 +1012,19 @@ class TradingEngine:
                             "reason": eval_mtf["confluence_text"]
                         })
 
-                # 1. GATILLO SNIPER PULLBACK INTRA-VELA A LA EMA9 (Segundos 15 a 42):
-                if (15 <= second_of_1m <= 42) and self.config.use_sniper_pullback and qualified_candidates:
-                    for cand in qualified_candidates:
-                        c_asset = cand["asset"]
-                        c_eval = cand["eval_mtf"]
-                        last_c = self.last_trade_candles.get(c_asset, -1)
-                        if c_eval.get("is_pullback", False) and current_candle_1m_id != last_c:
-                            if len(self.active_trades) < 4:
-                                executed = self._execute_order(
-                                    asset=c_asset,
-                                    action=cand["action"],
-                                    probability=cand["prob"],
-                                    votes=c_eval["votes"],
-                                    snapshot=c_eval["snapshot"],
-                                    macro_info=f"🎯 [SNIPER PULLBACK INTRA-VELA | SEG {second_of_1m}] {cand['reason']}"
-                                )
-                                if executed:
-                                    self.last_trade_candles[c_asset] = current_candle_1m_id
-                                    print(f">> 🎯 [SNIPER PULLBACK INTRA-VELA | SEG {second_of_1m}] {cand['action']} en {c_asset} ({cand['prob']:.1f}%)\n")
-
-                # 2. GATILLO MULTI-ACTIVO DESCORRELACIONADO AL CIERRE DE VELA (Segundos 58-59 o 00):
-                # Permite hasta 3 operaciones en paralelo de alta convicción sin sobreexposición
+                # DISPARO CUANTITATIVO DE ALTA PRECISIÓN AL CIERRE DE VELA CONFIRMADA (Segundos 58-59 o 00):
+                # Elimina cualquier ruido intra-vela y garantiza que la expiración cubra la siguiente vela completa de 1M
                 if is_trigger_window and qualified_candidates:
                     qualified_candidates.sort(key=lambda x: (1 if x["is_martingale"] else 0, x["prob"]), reverse=True)
                     
                     used_currencies = set()
                     executed_in_candle = 0
-                    max_concurrent_per_candle = 3
+                    max_concurrent_per_candle = 1  # 1 orden quirúrgica por cierre para evitar sobreexposición
                     
                     for cand in qualified_candidates:
                         if executed_in_candle >= max_concurrent_per_candle:
                             break
-                        if len(self.active_trades) >= 5:
+                        if len(self.active_trades) >= 2:  # Máximo 2 operaciones abiertas simultáneamente en todo el bot
                             break
                             
                         c_asset = cand["asset"]
@@ -1029,16 +1033,16 @@ class TradingEngine:
                         if current_candle_1m_id == last_c:
                             continue
                             
-                        # FILTRO DE DESCORRELACIÓN:
+                        # FILTRO DE DESCORRELACIÓN INSTITUCIONAL:
                         base_sym = c_asset.replace("-op", "").replace("-OTC", "")
                         curr_pair = (base_sym[:3], base_sym[3:6]) if len(base_sym) == 6 else (base_sym, "")
                         
-                        # Si ambas divisas ya fueron operadas en esta misma vela, omitir para evitar sobreexposición
-                        if curr_pair[0] in used_currencies and curr_pair[1] in used_currencies:
+                        # Si alguna de las divisas del par ya está activa, evitar correlación directa
+                        if curr_pair[0] in used_currencies or (curr_pair[1] and curr_pair[1] in used_currencies):
                             continue
                             
                         top_eval = cand["eval_mtf"]
-                        top_reason = f"🎯 [SNIPER MULTI-ACTIVO | SEG {second_of_1m}] {cand['reason']} (Prob: {cand['prob']:.1f}% &ge; Umbral: {user_thresh:.0f}%)"
+                        top_reason = f"🎯 [CIERRE VELA CONFIRMADO | SEG {second_of_1m}] {cand['reason']} (Prob: {cand['prob']:.1f}% &ge; Umbral: {user_thresh:.0f}%)"
                         
                         executed = self._execute_order(
                             asset=c_asset,
@@ -1054,7 +1058,7 @@ class TradingEngine:
                             used_currencies.add(curr_pair[0])
                             if curr_pair[1]:
                                 used_currencies.add(curr_pair[1])
-                            print(f">> 🎯 [ORDEN MULTI-ACTIVO EJECUTADA | SEG {second_of_1m}] {c_action} en {c_asset} | Convicción: {cand['prob']:.1f}%\n")
+                            print(f">> 🎯 [ORDEN DE ALTA CONVICCIÓN EJECUTADA] {c_action} en {c_asset} | Convicción: {cand['prob']:.1f}%\n")
 
                 self.current_state["assets_signals"] = self.assets_signals
                 self.current_state["active_trades"] = list(self.active_trades.values())

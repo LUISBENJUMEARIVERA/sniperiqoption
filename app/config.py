@@ -51,5 +51,5 @@ class BotConfig(BaseModel):
     martingale_multiplier: float = 2.0
     use_adaptive_threshold: bool = True  # Umbral dinámico adaptativo (74% en tendencia / 82% en rango)
     use_confidence_scaling: bool = True  # Escalado asimétrico por convicción estadística (Kelly)
-    use_sniper_pullback: bool = True     # Gatillo a mitad de vela por micro-retroceso a la EMA9
+    use_sniper_pullback: bool = False    # Disparos estrictos al cierre de vela confirmada (segundos 58-59 o 00)
     min_payout: float = 80.0             # Filtro de payout mínimo en vivo (>= 80%)

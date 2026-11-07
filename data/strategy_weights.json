@@ -1,12 +1,12 @@
 {
-  "SuperTrend Volatility": 0.1826,
-  "Triple EMA Ribbon": 0.1826,
-  "Candlestick Price Action": 0.1623,
-  "ADX Trend Strength": 0.1421,
-  "Bollinger Squeeze & Piercing": 0.1218,
-  "Dynamic RSI Reversal": 0.0812,
-  "Stochastic RSI Timing": 0.036,
-  "Support & Resistance Pivots": 0.0406,
-  "MACD Momentum Cross": 0.0304,
-  "Volume Flow Direction": 0.0203
+  "SuperTrend Volatility": 0.18,
+  "Triple EMA Ribbon": 0.18,
+  "Candlestick Price Action": 0.16,
+  "ADX Trend Strength": 0.14,
+  "Bollinger Squeeze & Piercing": 0.12,
+  "Dynamic RSI Reversal": 0.08,
+  "Stochastic RSI Timing": 0.06,
+  "Support & Resistance Pivots": 0.04,
+  "MACD Momentum Cross": 0.03,
+  "Volume Flow Direction": 0.01
 }

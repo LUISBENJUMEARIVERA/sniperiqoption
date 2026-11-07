@@ -466,13 +466,13 @@
             </div>
           </div>
 
-          <!-- Aceleradores Cuantitativos (Control Estricto de Usuario) -->
+          <!-- Filtros Cuantitativos de Alta Precisión -->
           <div class="quantum-features-bar">
-            <span class="qf-title">🚀 ACELERADORES DE ENTRADA (RESPETANDO ESTRICTAMENTE TU IMPORTE Y TU UMBRAL):</span>
+            <span class="qf-title">🛡️ BLINDAJE CUANTITATIVO Y PRECISIÓN WIN RATE &ge; 80%:</span>
             <div class="qf-grid">
-              <label class="qf-item" title="Detecta rebotes y pullbacks a la EMA9 a mitad de vela si la probabilidad alcanza tu umbral.">
-                <input type="checkbox" id="cfgPullback" checked>
-                <span>⚡ Gatillo Sniper Pullback (Disparos en rebotes a mitad de vela al superar tu umbral)</span>
+              <label class="qf-item" title="Disparos únicamente al cierre confirmado de vela (segundos 58-59 o 00) para evitar ruido intra-vela.">
+                <input type="checkbox" id="cfgPullback" checked disabled>
+                <span>🎯 Gatillo Quirúrgico al Cierre de Vela Confirmada (Expiración completa 1M)</span>
               </label>
               <label class="qf-item" title="Descarta cualquier activo con retorno menor al 80% para asegurar expectativa matemática favorable.">
                 <input type="checkbox" id="cfgPayout" checked>
@@ -490,11 +490,9 @@
             <div class="martingale-options" id="martingaleOptionsGroup" style="display: flex;">
               <label for="cfgMartingaleLevels" class="martingale-sublabel">Reentradas permitidas tras pérdida:</label>
               <select id="cfgMartingaleLevels" class="form-input martingale-select">
-                <option value="1" selected>1 Reentrada Inteligente (G1: x2 - Recomendada)</option>
-                <option value="2">2 Reentradas Inteligentes (G2: x4)</option>
-                <option value="3">3 Reentradas Inteligentes (G3: x8)</option>
+                <option value="1" selected>1 Reentrada de Alta Convicción (G1: x2 - Blindaje Máximo)</option>
               </select>
-              <span class="martingale-hint-badge">Multiplicador: 2.0x instantáneo</span>
+              <span class="martingale-hint-badge">Multiplicador: 2.0x (Solo si &ge; 6/10 estrategias a favor)</span>
             </div>
           </div>
 

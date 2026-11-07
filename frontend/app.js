@@ -607,10 +607,10 @@ async function handleStart() {
     mode: currentAccountMode || "PRACTICE",
     use_simulator: document.getElementById('cfgSim')?.checked || false,
     use_martingale: useMartingale,
-    martingale_levels: martingaleLevels,
+    martingale_levels: Math.min(1, martingaleLevels),
     use_adaptive_threshold: false, // Umbral 100% estricto del usuario
     use_confidence_scaling: false,  // Importe 100% estricto del usuario
-    use_sniper_pullback: document.getElementById('cfgPullback')?.checked ?? true,
+    use_sniper_pullback: false,     // Entradas estrictamente al cierre de vela confirmada (segundos 58-59 o 00)
     min_payout: (document.getElementById('cfgPayout')?.checked ?? true) ? 80.0 : 0.0
   };
 
