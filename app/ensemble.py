@@ -287,7 +287,7 @@ class EnsembleEngine:
             "macro_prob": macro_5m_prob,
             "regime_5m": regime_5m,
             "adaptive_threshold": 80.0,
-            "is_pullback": is_pullback_trigger,
+            "is_pullback": False,
             "micro_action": micro_1m_action,
             "micro_prob": micro_1m_prob,
             "dominant_action": final_action,
