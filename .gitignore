@@ -1,0 +1,23 @@
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Sensitive data (IQ Option credentials & local DB)
+data/credentials.json
+data/trades.db
+data/trades.db-journal
+
+# IDEs & System files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

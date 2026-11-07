@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AUTOTRADER AI | Quantitative Ensemble Demo Engine</title>
+  <link rel="stylesheet" href="/static/style.css?v=13.0">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    /* Estilos de la Matriz Cuantitativa Multi-Activo Auto-Responsive (Hasta 25 pares) */
+    .grid-3x2 {
+      display: grid !important;
+      grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)) !important;
+      gap: 1.15rem !important;
+      margin-top: 0.5rem !important;
+    }
+
+    .card-pair-quant {
+      background-color: #111827 !important;
+      border: 1px solid #1f2937 !important;
+      border-radius: 8px !important;
+      padding: 1.25rem !important;
+      display: flex !important;
+      flex-direction: column !important;
+      gap: 0.9rem !important;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.4) !important;
+      transition: all 0.25s ease !important;
+    }
+    .card-pair-quant:hover {
+      border-color: #3b82f6 !important;
+      transform: translateY(-2px);
+    }
+    .card-pair-quant.triggered {
+      border: 1.5px solid #f59e0b !important;
+      box-shadow: 0 0 15px rgba(245, 158, 11, 0.35) !important;
+      background: linear-gradient(180deg, rgba(245, 158, 11, 0.08) 0%, #111827 100%) !important;
+    }
+
+    .pair-card-header {
+      display: flex !important;
+      justify-content: space-between !important;
+      align-items: flex-start !important;
+    }
+    .pair-symbol {
+      font-family: 'JetBrains Mono', monospace !important;
+      font-size: 1.25rem !important;
+      font-weight: 800 !important;
+      color: #f9fafb !important;
+    }
+    .pair-regime-badge {
+      font-family: 'JetBrains Mono', monospace !important;
+      font-size: 0.72rem !important;
+      font-weight: 700 !important;
+      margin-top: 0.2rem !important;
+    }
+    .pair-price {
+      font-family: 'JetBrains Mono', monospace !important;
+      font-size: 1.15rem !important;
+      font-weight: 700 !important;
+      color: #06b6d4 !important;
+      text-align: right !important;
+    }
+    .pair-time {
+      font-size: 0.7rem !important;
+      color: #9ca3af !important;
+      font-family: 'JetBrains Mono', monospace !important;
+      text-align: right !important;
+    }
+
+    .pair-mini-radar {
+      background: #0a0e17 !important;
+      border: 1px solid #1f2937 !important;
+      border-radius: 6px !important;
+      padding: 0.85rem !important;
+      display: flex !important;
+      flex-direction: column !important;
+      gap: 0.65rem !important;
+    }
+    .radar-row {
+      display: flex !important;
+      flex-direction: column !important;
+      gap: 0.3rem !important;
+    }
+    .radar-row-labels {
+      display: flex !important;
+      justify-content: space-between !important;
+      font-family: 'JetBrains Mono', monospace !important;
+      font-size: 0.75rem !important;
+      font-weight: 700 !important;
+    }
+    .radar-track {
+      position: relative !important;
+      height: 14px !important;
+      background-color: #1f2937 !important;
+      border-radius: 4px !important;
+      overflow: hidden !important;
+    }
+    .radar-fill {
+      height: 100% !important;
+      transition: width 0.35s ease !important;
+    }
+    .radar-fill.fill-call {
+      background: linear-gradient(90deg, #065f46, #10b981) !important;
+    }
+    .radar-fill.fill-put {
+      background: linear-gradient(90deg, #991b1b, #ef4444) !important;
+    }
+    .radar-threshold-mark {
+      position: absolute !important;
+      top: 0 !important;
+      bottom: 0 !important;
+      left: 80% !important;
+      width: 2px !important;
+      background-color: #ffffff !important;
+      box-shadow: 0 0 5px #ffffff !important;
+      z-index: 2 !important;
+    }
+
+    .pair-card-footer {
+      display: flex !important;
+      justify-content: space-between !important;
+      align-items: center !important;
+      font-family: 'JetBrains Mono', monospace !important;
+      font-size: 0.75rem !important;
+      border-top: 1px dashed #1f2937 !important;
+      padding-top: 0.65rem !important;
+    }
+    .pair-action-pill {
+      padding: 0.2rem 0.55rem !important;
+      border-radius: 4px !important;
+      font-weight: 700 !important;
+    }
+    .pair-status-text {
+      color: #9ca3af !important;
+    }
+
+    /* Estilos de Martingala y Recuperación Automática */
+    .martingale-control-bar {
+      margin-top: 1rem !important;
+      padding: 0.85rem 1.15rem !important;
+      background: rgba(245, 158, 11, 0.07) !important;
+      border: 1px solid rgba(245, 158, 11, 0.3) !important;
+      border-radius: 8px !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: space-between !important;
+      flex-wrap: wrap !important;
+      gap: 1rem !important;
+    }
+    .martingale-toggle-label {
+      display: flex !important;
+      align-items: center !important;
+      gap: 0.65rem !important;
+      cursor: pointer !important;
+      font-weight: 700 !important;
+      color: #fbbf24 !important;
+      font-size: 0.9rem !important;
+      user-select: none !important;
+    }
+    .martingale-toggle-label input[type="checkbox"] {
+      width: 18px !important;
+      height: 18px !important;
+      accent-color: #f59e0b !important;
+      cursor: pointer !important;
+    }
+    .martingale-options {
+      display: flex !important;
+      align-items: center !important;
+      gap: 0.75rem !important;
+      flex-wrap: wrap !important;
+    }
+    .martingale-sublabel {
+      font-size: 0.82rem !important;
+      color: #e5e7eb !important;
+      font-weight: 600 !important;
+    }
+    .martingale-select {
+      background-color: #1f2937 !important;
+      color: #f9fafb !important;
+      border: 1px solid #4b5563 !important;
+      padding: 0.4rem 0.75rem !important;
+      border-radius: 6px !important;
+      font-family: 'JetBrains Mono', monospace !important;
+      font-size: 0.82rem !important;
+      font-weight: 600 !important;
+      cursor: pointer !important;
+    }
+    .martingale-hint-badge {
+      background: rgba(245, 158, 11, 0.15) !important;
+      color: #f59e0b !important;
+      border: 1px solid rgba(245, 158, 11, 0.3) !important;
+      padding: 0.25rem 0.55rem !important;
+      border-radius: 4px !important;
+      font-size: 0.72rem !important;
+      font-family: 'JetBrains Mono', monospace !important;
+      font-weight: 700 !important;
+    }
+    .martingale-active-badge {
+      display: inline-block !important;
+      margin-top: 0.3rem !important;
+      background: rgba(239, 68, 68, 0.2) !important;
+      color: #f87171 !important;
+      border: 1px solid rgba(239, 68, 68, 0.5) !important;
+      padding: 0.2rem 0.5rem !important;
+      border-radius: 4px !important;
+      font-size: 0.72rem !important;
+      font-family: 'JetBrains Mono', monospace !important;
+      font-weight: 800 !important;
+      letter-spacing: 0.3px !important;
+    }
+
+    /* Barra de Aceleradores Cuantitativos */
+    .quantum-features-bar {
+      margin-top: 0.85rem !important;
+      padding: 0.85rem 1.15rem !important;
+      background: rgba(6, 182, 212, 0.05) !important;
+      border: 1px solid rgba(6, 182, 212, 0.25) !important;
+      border-radius: 8px !important;
+      display: flex !important;
+      flex-direction: column !important;
+      gap: 0.65rem !important;
+    }
+    .qf-title {
+      font-size: 0.78rem !important;
+      font-family: 'JetBrains Mono', monospace !important;
+      font-weight: 800 !important;
+      color: #06b6d4 !important;
+      letter-spacing: 0.5px !important;
+    }
+    .qf-grid {
+      display: grid !important;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)) !important;
+      gap: 0.75rem !important;
+    }
+    .qf-item {
+      display: flex !important;
+      align-items: center !important;
+      gap: 0.55rem !important;
+      font-size: 0.78rem !important;
+      color: #e5e7eb !important;
+      cursor: pointer !important;
+      font-family: 'Inter', sans-serif !important;
+    }
+    .qf-item input[type="checkbox"] {
+      accent-color: #06b6d4 !important;
+      width: 16px !important;
+      height: 16px !important;
+    }
+    .payout-badge {
+      font-size: 0.72rem !important;
+      font-family: 'JetBrains Mono', monospace !important;
+      color: #10b981 !important;
+      font-weight: 700 !important;
+    }
+
+    /* Estilo Tarjeta Operaciones Abiertas */
+    .open-card {
+      border: 1px solid rgba(245, 158, 11, 0.45) !important;
+      background: linear-gradient(180deg, rgba(245, 158, 11, 0.06) 0%, #111827 100%) !important;
+    }
+    .highlight-gold {
+      color: #f59e0b !important;
+      text-shadow: 0 0 10px rgba(245, 158, 11, 0.3) !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <!-- MENÚ LATERAL IZQUIERDO -->
+    <aside class="sidebar" id="appSidebar">
+      <div>
+        <div class="sidebar-brand">
+          <div class="sidebar-brand-icon">⚡</div>
+          <div>
+            <div class="sidebar-brand-title">AUTOTRADER</div>
+            <div class="sidebar-brand-sub">QUANTUM 10X PRO</div>
+          </div>
+        </div>
+
+        <nav class="sidebar-nav">
+          <div class="nav-section-title">Navegación Cuantitativa</div>
+          <button type="button" class="nav-item active" id="btnNavLive" onclick="switchView('live')">
+            <span class="nav-icon">📊</span>
+            <span>Monitor en Vivo</span>
+          </button>
+
+          <button type="button" class="nav-item" id="btnNavHistory" onclick="switchView('history')">
+            <span class="nav-icon">📜</span>
+            <span>Histórico Cuantitativo</span>
+          </button>
+
+          <div class="nav-section-title" style="margin-top: 1rem;">Módulos Futuros</div>
+          <button type="button" class="nav-item disabled" title="Próxima funcionalidad en desarrollo">
+            <span class="nav-icon">🧪</span>
+            <span>Monte Carlo Sim</span>
+            <span class="nav-badge-future">Pronto</span>
+          </button>
+
+          <button type="button" class="nav-item disabled" title="Próxima funcionalidad en desarrollo">
+            <span class="nav-icon">📡</span>
+            <span>Radar Volatilidad</span>
+            <span class="nav-badge-future">Pronto</span>
+          </button>
+        </nav>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="sidebar-status-box">
+          <span style="color: #9ca3af;">MOTOR DEMO:</span>
+          <span id="sidebarEngineStatus" style="color: var(--accent-green); font-weight: 700;">ACTIVO</span>
+        </div>
+        <button type="button" class="btn-sidebar-shutdown" onclick="handleShutdown()" title="Apagar completamente el servidor y cerrar el puerto 8000">
+          <span>🔌</span> <span>Apagar Servidor</span>
+        </button>
+        <div class="sidebar-version">v14.0 • Standalone Engine</div>
+      </div>
+    </aside>
+
+    <!-- ÁREA DE VISTA PRINCIPAL -->
+    <div class="main-viewport">
+      <!-- Header -->
+      <header class="top-nav">
+        <div class="brand">
+          <div class="pulse-indicator" id="statusPulse"></div>
+          <div class="brand-text">
+            <h1>AUTOTRADER <span class="badge-quant">QUANTUM 10X</span></h1>
+            <p class="subtitle">Investigación Cuantitativa &bull; <span class="badge-demo">SOLO CUENTA DEMO</span></p>
+          </div>
+        </div>
+        <div class="top-meta">
+          <div class="meta-item">
+            <span class="meta-label">ESTADO MOTOR</span>
+            <span class="meta-value engine-badge" id="engineStatusBadge">DETENIDO</span>
+          </div>
+          <div class="meta-item">
+            <span class="meta-label">MODO</span>
+            <span class="meta-value" id="dispMode">PRACTICE (DEMO)</span>
+          </div>
+          <div class="meta-item">
+            <span class="meta-label">SALDO</span>
+            <span class="meta-value balance-value" id="dispBalance">$10,000.00</span>
+          </div>
+          <div class="meta-item">
+            <span class="meta-label">RELOJ DE VELA (1M)</span>
+            <span class="meta-value highlight-cyan clock-meta-value" id="dispCandleClock">00:00 (60s)</span>
+          </div>
+          <button id="btnSwitchAccount" type="button" class="btn-account-switch" onclick="handleAccountModeClick()" title="Cambiar entre cuenta DEMO y CUENTA REAL">
+            <span id="btnSwitchAccountIcon">💰</span> <span id="btnSwitchAccountText">OPERAR EN CUENTA REAL</span>
+          </button>
+          <button id="btnShutdownHeader" type="button" class="btn-shutdown-top" onclick="handleShutdown()" title="Apagar el servidor local y liberar el puerto 8000">
+            <span>🔌</span> <span>APAGAR SERVIDOR</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Main Content -->
+      <main class="main-content">
+        <!-- VISTA EN VIVO -->
+        <div id="viewLive" class="view-pane" style="display: flex; flex-direction: column; gap: 1.5rem;">
+      
+      <!-- KPI Cards: Requisito del usuario -->
+      <section class="kpi-grid">
+        <div class="kpi-card">
+          <div class="kpi-header">
+            <span>OPERACIONES TOTALES</span>
+            <span class="kpi-icon">📊</span>
+          </div>
+          <div class="kpi-value" id="kpiTotal">0</div>
+          <div class="kpi-sub">Ejecutadas en segundo plano</div>
+        </div>
+
+        <div class="kpi-card open-card">
+          <div class="kpi-header">
+            <span>OPERACIONES ABIERTAS</span>
+            <span class="kpi-icon">⚡</span>
+          </div>
+          <div class="kpi-value highlight-gold" id="kpiOpen">0</div>
+          <div class="kpi-sub" id="kpiOpenSub">Sin operaciones en curso</div>
+        </div>
+
+        <div class="kpi-card win-card">
+          <div class="kpi-header">
+            <span>OPERACIONES GANADAS</span>
+            <span class="kpi-icon">✅</span>
+          </div>
+          <div class="kpi-value text-green" id="kpiWins">0</div>
+          <div class="kpi-sub">Aciertos confirmados (Wins)</div>
+        </div>
+
+        <div class="kpi-card loss-card">
+          <div class="kpi-header">
+            <span>OPERACIONES PERDIDAS</span>
+            <span class="kpi-icon">❌</span>
+          </div>
+          <div class="kpi-value text-red" id="kpiLosses">0</div>
+          <div class="kpi-sub">Fallos registrados (Losses)</div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-header">
+            <span>TASA DE ACIERTO (WIN RATE)</span>
+            <span class="kpi-icon">🎯</span>
+          </div>
+          <div class="kpi-value highlight-cyan" id="kpiWinRate">0.0%</div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="winRateBar" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-header">
+            <span>BENEFICIO DEMO NETO</span>
+            <span class="kpi-icon">💰</span>
+          </div>
+          <div class="kpi-value" id="kpiProfit">$0.00</div>
+          <div class="kpi-sub">Resultado acumulado PnL</div>
+        </div>
+      </section>
+
+      <!-- Panel de Control y Configuración Compacto -->
+      <section class="panel controls-compact-panel">
+        <div class="panel-header">
+          <h3>⚙️ PANEL DE CONTROL & AUTONOMÍA</h3>
+          <span class="threshold-pill">UMBRAL DE ENTRADA: <strong id="threshText">&ge; 80%</strong></span>
+        </div>
+
+        <form id="controlForm" class="control-form" onsubmit="event.preventDefault();">
+          <div class="config-bar-grid">
+            <div class="form-group" style="grid-column: 1 / -1;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.35rem; flex-wrap: wrap; gap: 0.5rem;">
+                <label style="font-weight: 700; color: #06b6d4; font-family: var(--font-mono); font-size: 0.8rem; display: flex; align-items: center; gap: 0.4rem;">
+                  <span>🤖 RADAR AUTÓNOMO DE MERCADO (AUTO-DESCUBRIMIENTO 24/7)</span>
+                </label>
+                <span class="threshold-pill" id="autoScannerStatusBadge" style="background: rgba(16, 185, 129, 0.15); color: var(--accent-green); border: 1px solid rgba(16, 185, 129, 0.3);">
+                  ⚡ ROTACIÓN DINÁMICA: 20 A 25 PARES EN PARALELO
+                </span>
+              </div>
+              
+              <div class="auto-assets-container" id="autoAssetsList" style="background: #090d15; border: 1px solid #1f2937; border-radius: 6px; padding: 0.75rem 1rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;">
+                <span style="font-size: 0.75rem; color: #9ca3af; font-family: var(--font-mono);">
+                  ⏳ El bot escaneará el catálogo global de IQ Option al iniciar, seleccionando automáticamente los pares abiertos con mejor retorno (&ge;80%) y rotando la cartera cada 45s.
+                </span>
+              </div>
+              <p style="font-size: 0.68rem; color: #9ca3af; margin-top: 0.35rem; font-family: var(--font-mono);">
+                ✓ Cero selección manual: el algoritmo detecta apertura/cierre de mercados y da de baja o alta pares autónomamente para maximizar el Payout.
+              </p>
+            </div>
+
+            <div class="form-group">
+              <label>Vela & Expiración</label>
+              <select id="cfgTimeframe" class="form-input">
+                <option value="1">1 Minuto</option>
+                <option value="2">2 Minutos</option>
+                <option value="5">5 Minutos</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label>Importe Demo ($)</label>
+              <input type="number" id="cfgAmount" class="form-input" value="10" min="1" max="1000">
+            </div>
+
+            <div class="form-group">
+              <label>Umbral Disparo (%)</label>
+              <input type="number" id="cfgThreshold" class="form-input" value="80" min="50" max="99" oninput="document.getElementById('threshText').innerHTML = '&ge; ' + this.value + '%'">
+            </div>
+          </div>
+
+          <!-- Aceleradores Cuantitativos (Control Estricto de Usuario) -->
+          <div class="quantum-features-bar">
+            <span class="qf-title">🚀 ACELERADORES DE ENTRADA (RESPETANDO ESTRICTAMENTE TU IMPORTE Y TU UMBRAL):</span>
+            <div class="qf-grid">
+              <label class="qf-item" title="Detecta rebotes y pullbacks a la EMA9 a mitad de vela si la probabilidad alcanza tu umbral.">
+                <input type="checkbox" id="cfgPullback" checked>
+                <span>⚡ Gatillo Sniper Pullback (Disparos en rebotes a mitad de vela al superar tu umbral)</span>
+              </label>
+              <label class="qf-item" title="Descarta cualquier activo con retorno menor al 80% para asegurar expectativa matemática favorable.">
+                <input type="checkbox" id="cfgPayout" checked>
+                <span>🛡️ Filtro de Payout en Vivo (&ge; 80%)</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Control de Reentradas de Recuperación (Martingala x2) -->
+          <div class="martingale-control-bar">
+            <label class="martingale-toggle-label">
+              <input type="checkbox" id="cfgMartingale" checked onchange="toggleMartingaleDropdown()">
+              <span class="martingale-toggle-title">⚡ Activar Reentradas de Recuperación (Martingala x2) [ACTIVO POR DEFECTO]</span>
+            </label>
+            <div class="martingale-options" id="martingaleOptionsGroup" style="display: flex;">
+              <label for="cfgMartingaleLevels" class="martingale-sublabel">Reentradas permitidas tras pérdida:</label>
+              <select id="cfgMartingaleLevels" class="form-input martingale-select">
+                <option value="1" selected>1 Reentrada Inteligente (G1: x2 - Recomendada)</option>
+                <option value="2">2 Reentradas Inteligentes (G2: x4)</option>
+                <option value="3">3 Reentradas Inteligentes (G3: x8)</option>
+              </select>
+              <span class="martingale-hint-badge">Multiplicador: 2.0x instantáneo</span>
+            </div>
+          </div>
+
+          <!-- Credenciales persistentes para IQ Option -->
+          <details class="credentials-dropdown" id="credsDetails" open>
+            <summary>🔐 Credenciales IQ Option (Guardadas automáticamente)</summary>
+            <div class="creds-body">
+              <p class="creds-hint">Tus credenciales se guardan localmente para no tener que escribirlas de nuevo. Puedes operar tanto en Demo como en Cuenta Real bajo tu confirmación.</p>
+              <div class="form-row">
+                <input type="text" id="cfgEmail" class="form-input" placeholder="Email IQ Option">
+                <div style="position: relative; flex: 1; display: flex; align-items: center;">
+                  <input type="password" id="cfgPassword" class="form-input" placeholder="Contraseña IQ Option" style="padding-right: 2.8rem; width: 100%;">
+                  <button type="button" id="btnTogglePassword" onclick="togglePasswordVisibility()" title="Mostrar/Ocultar contraseña" style="position: absolute; right: 10px; background: transparent; border: none; color: #9ca3af; cursor: pointer; font-size: 1.1rem; padding: 4px;">👁</button>
+                </div>
+              </div>
+              <label class="checkbox-label">
+                <input type="checkbox" id="cfgSim">
+                <span>Modo Simulador Local de Respaldo (Marcar solo si deseas probar sin conectar a IQ Option)</span>
+              </label>
+            </div>
+          </details>
+
+          <div id="connectionBanner" class="connection-banner" style="display:none;"></div>
+
+          <div class="action-buttons-compact">
+            <button id="btnStart" type="button" class="btn btn-start" onclick="handleStart()">▶ INICIAR ESCÁNER EN SEGUNDO PLANO</button>
+            <button id="btnStop" type="button" class="btn btn-stop" onclick="handleStop()" disabled>⏹ DETENER ESCÁNER</button>
+            <button id="btnShutdown" type="button" class="btn btn-shutdown" onclick="handleShutdown()" title="Apaga el servidor y libera el puerto 8000">🔌 APAGAR SERVIDOR (LIBERAR PUERTO)</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- LAS 6 TARJETAS EN 3 COLUMNAS X 2 FILAS, PRE-RENDERIZADAS EN HTML -->
+      <section class="panel multi-asset-main-panel">
+        <div class="panel-header">
+          <div>
+            <h3>🌐 MATRIZ CUANTITATIVA MULTI-ACTIVO (ALTA AMPLITUD)</h3>
+            <p class="panel-desc">Monitoreo paralelo de 10 estrategias por activo. Disparos concurrentes en hasta 3 pares descorrelacionados por vela al superar el 80%.</p>
+          </div>
+          <span class="threshold-pill" id="activeAssetsCount">20-25 PARES EN VIGILANCIA PARALELA</span>
+        </div>
+
+        <div class="grid-3x2" id="multiAssetsGrid">
+          <div id="radarEmptyState" style="grid-column: 1 / -1; text-align: center; padding: 3rem 1.5rem; background: #090d15; border: 1px dashed rgba(6, 182, 212, 0.3); border-radius: 8px;">
+            <div style="font-size: 2rem; margin-bottom: 0.75rem;">🌐</div>
+            <div style="font-size: 0.95rem; font-weight: 700; color: #06b6d4; font-family: var(--font-mono); margin-bottom: 0.4rem;">
+              RADAR AUTÓNOMO DE MERCADO IQ OPTION
+            </div>
+            <p style="font-size: 0.8rem; color: #9ca3af; font-family: var(--font-mono); margin: 0; max-width: 600px; margin-inline: auto;">
+              Al iniciar, el motor realiza una auditoría en vivo del catálogo global de IQ Option. Selecciona automáticamente los 8 a 10 mejores pares verificados como abiertos y con el mayor payout (&ge;80%), generando sus tarjetas de análisis en tiempo real.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Strategy Learning & Auto-Optimization Section -->
+      <section class="panel optimization-panel">
+        <div class="panel-header">
+          <div>
+            <h3>🧠 MOTOR DE AUTO-APRENDIZAJE Y GENERACIÓN DE ESTRATEGIAS</h3>
+            <p class="panel-desc">El algoritmo examina cada operación ganada y perdida en la base de datos para reponderar las 10 estrategias y descubrir combinaciones óptimas.</p>
+          </div>
+          <button id="btnOptimize" class="btn btn-optimize" onclick="triggerOptimization()">
+            ⚡ ANALIZAR Y OPTIMIZAR AHORA
+          </button>
+        </div>
+
+        <div id="optimizationResult" class="optimization-result-box" style="display: none;"></div>
+
+        <div class="strategies-table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>ESTRATEGIA</th>
+                <th>PESO PONDERADO ($W_i$)</th>
+                <th>SEÑALES TOTALES</th>
+                <th>ACIERTOS (WINS)</th>
+                <th>FALLOS (LOSSES)</th>
+                <th>PRECISIÓN HISTÓRICA</th>
+                <th>ÚLTIMO VOTO</th>
+              </tr>
+            </thead>
+            <tbody id="strategiesTbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Recorded Trades History: Auditoría y Persistencia -->
+      <section class="panel history-panel">
+        <div class="panel-header">
+          <div>
+            <h3>📋 REGISTRO PERSISTENTE DE OPERACIONES (SQLITE AUDIT LOG)</h3>
+            <p class="panel-desc">Registro forense de cada disparo: activo, votos de las 10 estrategias, probabilidad de entrada y resultado final.</p>
+          </div>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <button class="btn btn-secondary" onclick="loadTrades()">🔄 Refrescar Registro</button>
+            <button class="btn btn-danger-sm" onclick="handleClearHistory()" title="Borrar operaciones anteriores para reiniciar investigación sin sesgo">🗑️ Blanquear Histórico</button>
+          </div>
+        </div>
+
+        <div class="trades-table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>HORA</th>
+                <th>ACTIVO</th>
+                <th>DIRECCIÓN</th>
+                <th>IMPORTE</th>
+                <th>PROBABILIDAD</th>
+                <th>RESULTADO</th>
+                <th>BENEFICIO DEMO</th>
+                <th>DETALLE ESTRATEGIAS</th>
+              </tr>
+            </thead>
+            <tbody id="tradesTbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      </div> <!-- Fin de #viewLive -->
+
+      <!-- ========================================================
+           VISTA HISTÓRICA DEDICADA (ANÁLISIS CUANTITATIVO POR FECHAS)
+           ======================================================== -->
+      <div id="viewHistory" class="view-pane" style="display: none; flex-direction: column; gap: 1.5rem;">
+        
+        <!-- Panel de Filtros por Fechas -->
+        <section class="history-filter-panel">
+          <div class="history-filter-header">
+            <div>
+              <h3>📜 ANÁLISIS HISTÓRICO & AUDITORÍA FORENSE</h3>
+              <p class="panel-desc" style="margin-top: 0.25rem;">Consulta acumulada persistente en SQLite. El motor sigue analizando y operando en segundo plano sin interrupción.</p>
+            </div>
+            <span class="history-live-alert">⚡ ESCÁNER EN SEGUNDO PLANO: ACTIVO</span>
+          </div>
+
+          <!-- Botones Rápidos de Rango -->
+          <div class="history-presets-row">
+            <span style="font-size: 0.75rem; font-family: var(--font-mono); color: #9ca3af; font-weight: 700; align-self: center;">FILTROS RÁPIDOS:</span>
+            <button type="button" class="btn-chip active" id="chipAll" onclick="applyQuickHistoryFilter('all')">Todo el Histórico</button>
+            <button type="button" class="btn-chip" id="chipToday" onclick="applyQuickHistoryFilter('today')">Hoy</button>
+            <button type="button" class="btn-chip" id="chipYesterday" onclick="applyQuickHistoryFilter('yesterday')">Ayer</button>
+            <button type="button" class="btn-chip" id="chip7d" onclick="applyQuickHistoryFilter('7d')">Últimos 7 días</button>
+            <button type="button" class="btn-chip" id="chip30d" onclick="applyQuickHistoryFilter('30d')">Últimos 30 días</button>
+          </div>
+
+          <!-- Selección Manual de Fechas -->
+          <div class="history-custom-dates-row">
+            <div class="date-input-group">
+              <label for="histStartDate">FECHA DESDE:</label>
+              <input type="date" id="histStartDate" class="date-input-picker">
+            </div>
+            <div class="date-input-group">
+              <label for="histEndDate">FECHA HASTA:</label>
+              <input type="date" id="histEndDate" class="date-input-picker">
+            </div>
+            <button type="button" class="btn btn-primary" onclick="handleFilterCustomDates()" style="padding: 0.45rem 1.15rem; font-size: 0.82rem; font-family: var(--font-mono); font-weight: 700; background: var(--accent-cyan); color: #000; border: none; border-radius: 6px; cursor: pointer;">
+              🔍 FILTRAR FECHAS
+            </button>
+            <button type="button" class="btn btn-secondary" onclick="applyQuickHistoryFilter('all')" style="padding: 0.45rem 1.15rem; font-size: 0.82rem; font-family: var(--font-mono); font-weight: 700; cursor: pointer;">
+              🔄 RESTABLECER
+            </button>
+            <button type="button" class="btn btn-danger-sm" onclick="handleClearHistory()" style="padding: 0.45rem 1rem; font-size: 0.82rem; font-family: var(--font-mono); font-weight: 700; cursor: pointer;">
+              🗑️ BLANQUEAR HISTÓRICO
+            </button>
+
+            <span class="hist-scope-badge" id="histRangeBadge">Histórico Completo Acumulado</span>
+          </div>
+        </section>
+
+        <!-- KPI Cards Filtradas para el Histórico -->
+        <section class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-header">
+              <span>OPERACIONES EN EL RANGO</span>
+              <span class="kpi-icon">📊</span>
+            </div>
+            <div class="kpi-value" id="histKpiTotal">0</div>
+            <div class="kpi-sub">Total registradas en el período</div>
+          </div>
+
+          <div class="kpi-card win-card">
+            <div class="kpi-header">
+              <span>OPERACIONES GANADAS</span>
+              <span class="kpi-icon">✅</span>
+            </div>
+            <div class="kpi-value text-green" id="histKpiWins">0</div>
+            <div class="kpi-sub">Aciertos confirmados (Wins)</div>
+          </div>
+
+          <div class="kpi-card loss-card">
+            <div class="kpi-header">
+              <span>OPERACIONES PERDIDAS</span>
+              <span class="kpi-icon">❌</span>
+            </div>
+            <div class="kpi-value text-red" id="histKpiLosses">0</div>
+            <div class="kpi-sub">Fallos registrados (Losses)</div>
+          </div>
+
+          <div class="kpi-card">
+            <div class="kpi-header">
+              <span>TASA DE ACIERTO (WIN RATE)</span>
+              <span class="kpi-icon">🎯</span>
+            </div>
+            <div class="kpi-value highlight-cyan" id="histKpiWinRate">0.0%</div>
+            <div class="progress-bar-bg">
+              <div class="progress-bar-fill" id="histWinRateBar" style="width: 0%;"></div>
+            </div>
+          </div>
+
+          <div class="kpi-card">
+            <div class="kpi-header">
+              <span>BENEFICIO DEMO NETO</span>
+              <span class="kpi-icon">💰</span>
+            </div>
+            <div class="kpi-value" id="histKpiProfit">$0.00</div>
+            <div class="kpi-sub">PnL acumulado del período</div>
+          </div>
+        </section>
+
+        <!-- Tabla Detallada de Operaciones Históricas -->
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h3>📋 REGISTRO FORENSE DETALLADO DEL HISTÓRICO</h3>
+              <p class="panel-desc">Desglose completo con fecha, hora, dirección, activos y votos de las 10 estrategias.</p>
+            </div>
+            <button class="btn btn-secondary" onclick="reloadCurrentHistoryView()">🔄 Actualizar Datos</button>
+          </div>
+
+          <div class="trades-table-wrapper" style="max-height: 550px;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>FECHA & HORA</th>
+                  <th>ACTIVO</th>
+                  <th>DIRECCIÓN</th>
+                  <th>IMPORTE</th>
+                  <th>PROBABILIDAD</th>
+                  <th>RESULTADO</th>
+                  <th>BENEFICIO DEMO</th>
+                  <th>DETALLE ESTRATEGIAS</th>
+                </tr>
+              </thead>
+              <tbody id="histTradesTbody">
+                <tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 2rem;">Cargando histórico desde SQLite...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+      </div> <!-- Fin de #viewHistory -->
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <span>AutoTrader Research Terminal &bull; Sistema Cuantitativo con Bloqueo de Seguridad Hardcoded a Cuenta DEMO</span>
+      <span id="socketStatus" class="socket-status">WebSocket: Conectando...</span>
+    </footer>
+    </div> <!-- Fin de .main-viewport -->
+  </div> <!-- Fin de .app-layout -->
+
+  <!-- MODAL DE ADVERTENCIA PARA CUENTA REAL -->
+  <div id="realAccountModal" class="modal-overlay-danger" style="display: none;">
+    <div class="modal-danger-card">
+      <div class="modal-danger-icon">⚠️</div>
+      <h2>ADVERTENCIA: PROGRAMA EXPERIMENTAL</h2>
+      <div class="modal-danger-body">
+        ESTAS EN UN PROGRAMA EXPERIMENTAL, LAS GANANCIAS O PERDIDAS SERÁN UNICAMENTE TU RESPONSABILIDAD , POR FAVOR CONSIDERA NUEVAMENTE LA IDEA DE PASARTE A LA CUENTA REAL
+      </div>
+      <div class="modal-danger-actions">
+        <button type="button" class="btn-cancel-demo" onclick="cancelRealAccountModal()">
+          Cancelar
+        </button>
+        <button type="button" class="btn-danger-confirm" onclick="confirmSwitchToReal()">
+          Aceptar
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL DE SERVIDOR APAGADO -->
+  <div id="shutdownModal" class="shutdown-modal-overlay" style="display: none;">
+    <div class="shutdown-card">
+      <div class="shutdown-icon">🔌</div>
+      <h2>Servidor Apagado</h2>
+      <p>El motor de AutoTrader se ha detenido y el <strong>puerto 8000</strong> ha sido liberado exitosamente.</p>
+      <div class="shutdown-subtext">Ya puedes cerrar esta pestaña del navegador con tranquilidad.</div>
+      <div class="shutdown-hint">
+        💡 <strong>Para volver a iniciar:</strong> haz doble clic en el acceso directo <strong>AutoTrader Quantum 10X</strong> en tu Escritorio.
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=14.0"></script>
+</body>
+</html>
