@@ -597,55 +597,28 @@ class TradingEngine:
             target_asset = asset
             payout = 86.0
 
-        # FILTRO DE SEGURIDAD ESTRICTO: Evaluar la vela cerrada que causó la pérdida
+        # FILTRO DE SEGURIDAD ESTRICTO: Evaluar con el motor Multi-Timeframe institucional (5M y 1M)
+        df_5m = self._fetch_asset_candles(target_asset, count=60, timeframe_sec=300)
         df_1m = self._fetch_asset_candles(target_asset, count=40, timeframe_sec=60)
-        eval_1m = self.ensemble.evaluate(df_1m)
-        votes = eval_1m.get("votes", {})
-        
-        st_vote = votes.get("SuperTrend Volatility", 0.0)
-        ema_vote = votes.get("Triple EMA Ribbon", 0.0)
-        
-        opposite_action = "PUT" if action == "CALL" else "CALL"
-        fav_orig = sum(1 for v in votes.values() if (action == "CALL" and v > 0) or (action == "PUT" and v < 0))
-        fav_opp = sum(1 for v in votes.values() if (opposite_action == "CALL" and v > 0) or (opposite_action == "PUT" and v < 0))
+        eval_mtf = self.ensemble.evaluate_mtf(df_5m, df_1m)
+        votes = eval_mtf.get("votes", {})
         
         m_key = base_asset if base_asset in self.martingale_state else asset
+        eval_action = eval_mtf.get("dominant_action")
 
-        # CONDICIÓN DE VETO ESTRICTA:
-        # 1. Si la vela rompió violentamente en contra (SuperTrend o EMA invertidos)
-        # 2. O si menos de 6 de las 10 estrategias apoyan la dirección de recuperación
-        # ABORTAR DE INMEDIATO para evitar quemar capital contra la tendencia
-        has_breakout_against = (action == "CALL" and (st_vote < 0 or ema_vote < 0)) or \
-                               (action == "PUT" and (st_vote > 0 or ema_vote > 0))
-
-        # Caso A: El mercado giró de forma contundente (>= 7 estrategias y prob >= 80% en dirección opuesta)
-        can_adapt = (fav_opp >= 7 and eval_1m["dominant_probability"] >= 80.0 and eval_1m["dominant_action"] == opposite_action)
-
-        if has_breakout_against and not can_adapt:
-            print(f"\n>> 🛡️🛑 [MARTINGALA ABORTADA POR SEGURIDAD] {target_asset}: Rompimiento violento en contra detectado. Solo {fav_orig}/10 estrategias a favor. Reentrada G{next_level} cancelada para proteger capital.")
-            if m_key in self.martingale_state:
-                self.martingale_state[m_key]["current_level"] = 0
-                self.martingale_state[m_key]["next_amount"] = self.config.amount
-                self.martingale_state[m_key]["immediate_reentry"] = False
-            return False
-
-        if fav_orig < 6 and not can_adapt:
-            print(f"\n>> 🛡️🛑 [MARTINGALA ABORTADA POR SEGURIDAD] {target_asset}: Consenso insuficiente ({fav_orig}/10 estrategias a favor). Reentrada G{next_level} cancelada para evitar pérdida consecutiva.")
-            if m_key in self.martingale_state:
-                self.martingale_state[m_key]["current_level"] = 0
-                self.martingale_state[m_key]["next_amount"] = self.config.amount
-                self.martingale_state[m_key]["immediate_reentry"] = False
-            return False
-
-        if can_adapt:
-            recov_action = opposite_action
-            count_fav = fav_opp
-            recov_prob = eval_1m["dominant_probability"]
-            print(f">> 🔄 [MARTINGALA ADAPTATIVA] {target_asset}: Mercado volcado a {recov_action} ({fav_opp}/10 a favor | {recov_prob:.1f}%). Reentrada adaptada a la nueva dirección.")
+        # REQUISITO EXIGENTE DE RECUPERACIÓN: Solo entrar si se confirma un Setup A o Setup B al cierre
+        if eval_action in ["CALL", "PUT"]:
+            recov_action = eval_action
+            recov_prob = eval_mtf["dominant_probability"]
+            count_fav = sum(1 for v in votes.values() if (recov_action == "CALL" and v > 0) or (recov_action == "PUT" and v < 0))
+            print(f">> 🎯 [REENTRADA VALIDADA POR SETUP] {target_asset}: Patrón confirmado hacia {recov_action} ({count_fav}/10 a favor | Prob: {recov_prob:.1f}%).")
         else:
-            recov_action = action
-            count_fav = fav_orig
-            recov_prob = eval_1m["prob_call"] if action == "CALL" else eval_1m["prob_put"]
+            print(f"\n>> 🛡️🛑 [MARTINGALA ABORTADA POR SEGURIDAD] {target_asset}: Sin setup institucional al cierre ({eval_mtf['confluence_text']}). Reentrada G{next_level} cancelada para proteger capital.")
+            if m_key in self.martingale_state:
+                self.martingale_state[m_key]["current_level"] = 0
+                self.martingale_state[m_key]["next_amount"] = self.config.amount
+                self.martingale_state[m_key]["immediate_reentry"] = False
+            return False
 
         trade_uid = str(uuid.uuid4())[:12]
         expiration_min = 1
@@ -1024,13 +997,13 @@ class TradingEngine:
                     for cand in qualified_candidates:
                         if executed_in_candle >= max_concurrent_per_candle:
                             break
-                        if len(self.active_trades) >= 2:  # Máximo 2 operaciones abiertas simultáneamente en todo el bot
+                        if len(self.active_trades) >= 1:  # MÁXIMA PRECISIÓN: Solo 1 operación activa a la vez en todo el bot
                             break
                             
                         c_asset = cand["asset"]
                         c_action = cand["action"]
                         last_c = self.last_trade_candles.get(c_asset, -1)
-                        if current_candle_1m_id == last_c:
+                        if (current_candle_1m_id - last_c) < 2:  # Cooldown de al menos 2 velas para refrescar el ciclo de liquidez
                             continue
                             
                         # FILTRO DE DESCORRELACIÓN INSTITUCIONAL:

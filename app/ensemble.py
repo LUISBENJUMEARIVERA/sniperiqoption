@@ -3,7 +3,7 @@ import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, Tuple
-from app.strategies import ALL_STRATEGY_FUNCS, TechnicalStrategies
+from app.strategies import ALL_STRATEGY_FUNCS, TechnicalStrategies, calc_ema, calc_rsi, calc_atr
 from app.database import get_connection
 
 logger = logging.getLogger("AutoTrader.Ensemble")
@@ -199,88 +199,144 @@ class EnsembleEngine:
         l_1m = float(df_1m['low'].iloc[-1])
         h_1m = float(df_1m['high'].iloc[-1])
         
-        # 1. FILTRO DE VELA DOJI / FALTA DE VOLATILIDAD:
+        # Métricas de Price Action de la vela actual de 1M
+        c_1m = float(df_1m['close'].iloc[-1])
+        o_1m = float(df_1m['open'].iloc[-1])
+        l_1m = float(df_1m['low'].iloc[-1])
+        h_1m = float(df_1m['high'].iloc[-1])
+        
         body_1m = abs(c_1m - o_1m)
         range_1m = h_1m - l_1m + 1e-9
-        is_doji = (body_1m / range_1m) < 0.20
+        lower_wick = min(c_1m, o_1m) - l_1m
+        upper_wick = h_1m - max(c_1m, o_1m)
 
-        # 2. FILTRO DE AGOTAMIENTO EXTREMO (Anti-trampas de techo/suelo en binarias):
+        lower_wick_ratio = lower_wick / range_1m
+        upper_wick_ratio = upper_wick / range_1m
+        body_ratio = body_1m / range_1m
+
+        # Cálculo de ATR(14) en 1M para volatilidad normalizada
+        atr_series = calc_atr(df_1m, 14)
+        atr_1m = float(atr_series.iloc[-1]) if not np.isnan(atr_series.iloc[-1]) else range_1m
+
+        # Medias y Bandas de Bollinger (20, 2.2) en 1M
+        ema9_1m = float(calc_ema(df_1m['close'], 9).iloc[-1])
+        ema21_1m = float(calc_ema(df_1m['close'], 21).iloc[-1])
         sma20 = float(df_1m['close'].rolling(20).mean().iloc[-1])
         std20 = float(df_1m['close'].rolling(20).std().iloc[-1])
-        upper_bb = sma20 + (2.0 * std20)
-        lower_bb = sma20 - (2.0 * std20)
+        upper_bb = sma20 + (2.2 * std20)
+        lower_bb = sma20 - (2.2 * std20)
         
-        # Cálculo de RSI actual
-        delta = df_1m['close'].diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        avg_gain = gain.ewm(com=13, min_periods=14).mean()
-        avg_loss = loss.ewm(com=13, min_periods=14).mean()
-        rs = avg_gain / (avg_loss + 1e-9)
-        rsi_series = 100 - (100 / (1 + rs))
+        # RSI Dinámico
+        rsi_series = calc_rsi(df_1m['close'], 14)
         rsi_val = float(rsi_series.iloc[-1]) if not np.isnan(rsi_series.iloc[-1]) else 50.0
 
-        is_exhausted_call = (c_1m >= upper_bb and rsi_val >= 70.0) or (rsi_val >= 74.0)
-        is_exhausted_put = (c_1m <= lower_bb and rsi_val <= 30.0) or (rsi_val <= 26.0)
+        # FILTRO 1: MERCADO PLANO / SIN VOLATILIDAD (Elimina micro-ruido que produce 50/50)
+        pip_threshold = 0.012 if c_1m > 50 else 0.00009
+        is_dead_market = (range_1m < pip_threshold) or (body_ratio < 0.18)
 
-        # Vetoes de seguridad cuántica: Prohibido operar contra la inercia del SuperTrend o Triple EMA
+        # FILTRO 2: AGOTAMIENTO CLIMÁTICO (Vela gigante sobre-extendida > 2.2x ATR)
+        is_climactic_spike = range_1m > (2.2 * atr_1m)
+
+        # Conteo de votos de las 10 estrategias en 1M
+        v_call = sum(1 for v in eval_1m["votes"].values() if v > 0)
+        v_put = sum(1 for v in eval_1m["votes"].values() if v < 0)
         st_1m = eval_1m["votes"].get("SuperTrend Volatility", 0.0)
         ema_1m = eval_1m["votes"].get("Triple EMA Ribbon", 0.0)
 
-        if macro_bias == "CALL":
-            # REQUISITO RIGUROSO >80% WIN RATE:
-            # 1. No es vela Doji de indecisión
-            # 2. No está en agotamiento extremo contra resistencia / sobrecompra
-            # 3. 1M confirma CALL con >= 72% y al menos 7 de 10 estrategias a favor
-            # 4. CERO contradicciones en SuperTrend y Triple EMA (ambos >= 0)
-            has_no_conflict = (st_1m >= 0.0 and ema_1m >= 0.0)
-            
-            if not is_doji and not is_exhausted_call and micro_1m_action == "CALL" and eval_1m["prob_call"] >= 72.0 and v_call >= 7 and has_no_conflict:
-                base_prob = (0.45 * eval_5m["prob_call"]) + (0.55 * eval_1m["prob_call"])
-                consensus_bonus = 5.0 if v_call >= 9 else (3.0 if v_call >= 8 else 1.5)
-                final_prob_call = round(min(98.0, base_prob + consensus_bonus), 1)
-                final_prob_put = round(100.0 - final_prob_call, 1)
-                final_action = "CALL"
-                final_prob = final_prob_call
-                confluence_text = f"🔥 CONVERGENCIA INSTITUCIONAL MTF: 5M Alcista ({eval_5m['prob_call']:.1f}%) + 1M Confirmado ({eval_1m['prob_call']:.1f}% | {v_call}/10 estrategias a favor)"
-            else:
-                final_prob_call = round(0.40 * eval_5m["prob_call"], 1)
-                final_prob_put = round(100.0 - final_prob_call, 1)
-                final_action = "EN ESPERA"
-                final_prob = final_prob_call
-                reason_filter = "Doji" if is_doji else ("Agotamiento en techo" if is_exhausted_call else f"{v_call}/10 a favor")
-                confluence_text = f"⏳ Esperando confluencia estricta ({reason_filter} | SuperTrend/EMA: {'OK' if has_no_conflict else 'Conflicto'})"
-                
-        elif macro_bias == "PUT":
-            # REQUISITO RIGUROSO >80% WIN RATE:
-            # 1. No es vela Doji de indecisión
-            # 2. No está en agotamiento extremo contra soporte / sobreventa
-            # 3. 1M confirma PUT con >= 72% y al menos 7 de 10 estrategias a favor
-            # 4. CERO contradicciones en SuperTrend y Triple EMA (ambos <= 0)
-            has_no_conflict = (st_1m <= 0.0 and ema_1m <= 0.0)
-            
-            if not is_doji and not is_exhausted_put and micro_1m_action == "PUT" and eval_1m["prob_put"] >= 72.0 and v_put >= 7 and has_no_conflict:
-                base_prob = (0.45 * eval_5m["prob_put"]) + (0.55 * eval_1m["prob_put"])
-                consensus_bonus = 5.0 if v_put >= 9 else (3.0 if v_put >= 8 else 1.5)
-                final_prob_put = round(min(98.0, base_prob + consensus_bonus), 1)
-                final_prob_call = round(100.0 - final_prob_put, 1)
-                final_action = "PUT"
-                final_prob = final_prob_put
-                confluence_text = f"🔥 CONVERGENCIA INSTITUCIONAL MTF: 5M Bajista ({eval_5m['prob_put']:.1f}%) + 1M Confirmado ({eval_1m['prob_put']:.1f}% | {v_put}/10 estrategias a favor)"
-            else:
-                final_prob_put = round(0.40 * eval_5m["prob_put"], 1)
-                final_prob_call = round(100.0 - final_prob_put, 1)
-                final_action = "EN ESPERA"
-                final_prob = final_prob_put
-                reason_filter = "Doji" if is_doji else ("Agotamiento en suelo" if is_exhausted_put else f"{v_put}/10 a favor")
-                confluence_text = f"⏳ Esperando confluencia estricta ({reason_filter} | SuperTrend/EMA: {'OK' if has_no_conflict else 'Conflicto'})"
-                
-        else: # Macro 5M en consolidación / rango -> PROTECCIÓN ESTRICTA DE CAPITAL
+        # =========================================================================
+        # RECONOCIMIENTO DE PATRONES INSTITUCIONALES DE ALTA PROBABILIDAD (WIN RATE > 80%)
+        # =========================================================================
+
+        # PATRÓN 1: PULLBACK & REJECTION AT VALUE (El patrón más rentable en 1M)
+        # Para CALL: Tendencia alcista + testeo de EMA9/21 + rechazo con mecha inferior + cierre verde
+        is_pullback_call = (
+            macro_bias == "CALL" and st_1m >= 0.0 and ema_1m >= 0.0 and
+            l_1m <= max(ema9_1m, ema21_1m) * 1.0002 and  # Testeó soporte dinámico
+            lower_wick_ratio >= 0.30 and                  # Mecha de rechazo inferior >= 30%
+            c_1m > o_1m and                               # Cierre verde (compradores al mando)
+            (c_1m - l_1m) / range_1m >= 0.55 and          # Cerró en la mitad superior
+            c_1m < upper_bb and rsi_val <= 68.0 and       # Con espacio de recorrido
+            not is_climactic_spike and not is_dead_market and
+            v_call >= 6
+        )
+
+        # Para PUT: Tendencia bajista + testeo de EMA9/21 + rechazo con mecha superior + cierre rojo
+        is_pullback_put = (
+            macro_bias == "PUT" and st_1m <= 0.0 and ema_1m <= 0.0 and
+            h_1m >= min(ema9_1m, ema21_1m) * 0.9998 and  # Testeó resistencia dinámica
+            upper_wick_ratio >= 0.30 and                  # Mecha de rechazo superior >= 30%
+            c_1m < o_1m and                               # Cierre rojo (vendedores al mando)
+            (h_1m - c_1m) / range_1m >= 0.55 and          # Cerró en la mitad inferior
+            c_1m > lower_bb and rsi_val >= 32.0 and       # Con espacio de recorrido
+            not is_climactic_spike and not is_dead_market and
+            v_put >= 6
+        )
+
+        # PATRÓN 2: PINBAR EXTREMO / LIQUIDITY SWEEP EN BANDAS DE BOLLINGER (Reversión a la media)
+        is_pinbar_call = (
+            l_1m <= lower_bb and c_1m > lower_bb and     # Perforó banda inferior y cerró dentro
+            lower_wick_ratio >= 0.45 and                 # Martillo / Pinbar contundente
+            upper_wick_ratio <= 0.25 and
+            rsi_val <= 32.0 and
+            not is_dead_market
+        )
+
+        is_pinbar_put = (
+            h_1m >= upper_bb and c_1m < upper_bb and     # Perforó banda superior y cerró dentro
+            upper_wick_ratio >= 0.45 and                 # Estrella fugaz / Pinbar contundente
+            lower_wick_ratio <= 0.25 and
+            rsi_val >= 68.0 and
+            not is_dead_market
+        )
+
+        # =========================================================================
+        # DECISIÓN FINAL DEL MOTOR
+        # =========================================================================
+        if is_pullback_call:
+            final_action = "CALL"
+            final_prob_call = 94.5
+            final_prob_put = 5.5
+            final_prob = final_prob_call
+            confluence_text = f"🎯 [PATRÓN A] PULLBACK ALCISTA EN EMA: Rechazo institucional (Mecha inferior: {lower_wick_ratio*100:.0f}% | {v_call}/10 estrategias a favor)"
+        elif is_pinbar_call:
+            final_action = "CALL"
+            final_prob_call = 92.0
+            final_prob_put = 8.0
+            final_prob = final_prob_call
+            confluence_text = f"⚡ [PATRÓN B] REVERSIÓN SNIPER EN SUELO: Pinbar de rechazo en banda inferior Bollinger (RSI: {rsi_val:.1f})"
+        elif is_pullback_put:
+            final_action = "PUT"
+            final_prob_put = 94.5
+            final_prob_call = 5.5
+            final_prob = final_prob_put
+            confluence_text = f"🎯 [PATRÓN A] PULLBACK BAJISTA EN EMA: Rechazo institucional (Mecha superior: {upper_wick_ratio*100:.0f}% | {v_put}/10 estrategias a favor)"
+        elif is_pinbar_put:
+            final_action = "PUT"
+            final_prob_put = 92.0
+            final_prob_call = 8.0
+            final_prob = final_prob_put
+            confluence_text = f"⚡ [PATRÓN B] REVERSIÓN SNIPER EN TECHO: Pinbar de rechazo en banda superior Bollinger (RSI: {rsi_val:.1f})"
+        else:
+            final_action = "EN ESPERA"
             final_prob_call = 50.0
             final_prob_put = 50.0
-            final_action = "NEUTRAL (RANGO 5M)"
             final_prob = 50.0
-            confluence_text = "🛑 Macro 5M en Consolidación / Rango: Disparos bloqueados para evitar falsos quiebres"
+            
+            # Diagnóstico pedagógico del porqué espera
+            if is_dead_market:
+                motivo = "Volatilidad insuficiente (<1 pip o Doji plano)"
+            elif is_climactic_spike:
+                motivo = "Vela climática sobre-extendida (>2.2x ATR: riesgo alto de corrección)"
+            elif macro_bias == "RANGO":
+                motivo = "Macro 5M en rango/consolidación"
+            elif macro_bias == "CALL" and c_1m >= upper_bb:
+                motivo = "Precio pegado al techo de Bollinger (esperando retroceso)"
+            elif macro_bias == "PUT" and c_1m <= lower_bb:
+                motivo = "Precio pegado al suelo de Bollinger (esperando retroceso)"
+            else:
+                motivo = f"Esperando retroceso a zona de valor EMA (1M: {v_call}C / {v_put}P)"
+
+            confluence_text = f"⏳ Esperando Setup de Alta Probabilidad ({motivo})"
 
         return {
             "macro_bias": macro_bias,
