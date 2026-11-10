@@ -136,7 +136,7 @@ def start_bot(req: StartRequest):
         mode=req.mode,
         use_simulator=req.use_simulator,
         use_martingale=req.use_martingale,
-        martingale_levels=req.martingale_levels,
+        martingale_levels=min(1, max(1, req.martingale_levels)),
         use_adaptive_threshold=req.use_adaptive_threshold,
         use_confidence_scaling=req.use_confidence_scaling,
         use_sniper_pullback=req.use_sniper_pullback,

@@ -242,32 +242,48 @@ class EnsembleEngine:
         v_put = sum(1 for v in eval_1m["votes"].values() if v < 0)
         st_1m = eval_1m["votes"].get("SuperTrend Volatility", 0.0)
         ema_1m = eval_1m["votes"].get("Triple EMA Ribbon", 0.0)
+        adx_1m = eval_1m["votes"].get("ADX Trend Strength", 0.0)
+
+        prev_c = float(df_1m['close'].iloc[-2])
+        prev_o = float(df_1m['open'].iloc[-2])
 
         # =========================================================================
         # RECONOCIMIENTO DE PATRONES INSTITUCIONALES DE ALTA PROBABILIDAD (WIN RATE > 80%)
         # =========================================================================
 
-        # PATRÓN 1: PULLBACK & REJECTION AT VALUE (El patrón más rentable en 1M)
-        # Para CALL: Tendencia alcista + testeo de EMA9/21 + rechazo con mecha inferior + cierre verde
+        # PATRÓN 1: PULLBACK & REJECTION AT VALUE (Retroceso confirmado + rebote en zona de valor)
+        # Para CALL:
+        # - Tendencia alcista confirmada (5M Macro + SuperTrend/EMA Ribbon/ADX >= 0)
+        # - La vela anterior fue roja (prev_c < prev_o): HUBO UN RETROCESO REAL a la media
+        # - La vela actual testeó EMA9/21 y rechazó con mecha inferior >= 25%
+        # - Cierre verde sin agotamiento extremo en el techo (upper_wick >= 5% para evitar trampas de techo)
         is_pullback_call = (
-            macro_bias == "CALL" and st_1m >= 0.0 and ema_1m >= 0.0 and
-            l_1m <= max(ema9_1m, ema21_1m) * 1.0002 and  # Testeó soporte dinámico
-            lower_wick_ratio >= 0.30 and                  # Mecha de rechazo inferior >= 30%
-            c_1m > o_1m and                               # Cierre verde (compradores al mando)
-            (c_1m - l_1m) / range_1m >= 0.55 and          # Cerró en la mitad superior
-            c_1m < upper_bb and rsi_val <= 68.0 and       # Con espacio de recorrido
+            macro_bias == "CALL" and st_1m >= 0.0 and ema_1m >= 0.0 and adx_1m >= 0.0 and
+            prev_c < prev_o and
+            l_1m <= max(ema9_1m, ema21_1m) * 1.0003 and
+            lower_wick_ratio >= 0.25 and
+            c_1m > o_1m and
+            upper_wick_ratio >= 0.05 and
+            (c_1m - l_1m) / range_1m >= 0.50 and
+            c_1m < upper_bb and rsi_val <= 68.0 and
             not is_climactic_spike and not is_dead_market and
             v_call >= 6
         )
 
-        # Para PUT: Tendencia bajista + testeo de EMA9/21 + rechazo con mecha superior + cierre rojo
+        # Para PUT:
+        # - Tendencia bajista confirmada (5M Macro + SuperTrend/EMA Ribbon/ADX <= 0)
+        # - La vela anterior fue verde (prev_c > prev_o): HUBO UN RETROCESO REAL a la media
+        # - La vela actual testeó EMA9/21 y rechazó con mecha superior >= 25%
+        # - Cierre rojo sin agotamiento extremo en el suelo (lower_wick >= 5% para evitar trampas de suelo)
         is_pullback_put = (
-            macro_bias == "PUT" and st_1m <= 0.0 and ema_1m <= 0.0 and
-            h_1m >= min(ema9_1m, ema21_1m) * 0.9998 and  # Testeó resistencia dinámica
-            upper_wick_ratio >= 0.30 and                  # Mecha de rechazo superior >= 30%
-            c_1m < o_1m and                               # Cierre rojo (vendedores al mando)
-            (h_1m - c_1m) / range_1m >= 0.55 and          # Cerró en la mitad inferior
-            c_1m > lower_bb and rsi_val >= 32.0 and       # Con espacio de recorrido
+            macro_bias == "PUT" and st_1m <= 0.0 and ema_1m <= 0.0 and adx_1m <= 0.0 and
+            prev_c > prev_o and
+            h_1m >= min(ema9_1m, ema21_1m) * 0.9997 and
+            upper_wick_ratio >= 0.25 and
+            c_1m < o_1m and
+            lower_wick_ratio >= 0.05 and
+            (h_1m - c_1m) / range_1m >= 0.50 and
+            c_1m > lower_bb and rsi_val >= 32.0 and
             not is_climactic_spike and not is_dead_market and
             v_put >= 6
         )
@@ -289,6 +305,43 @@ class EnsembleEngine:
             not is_dead_market
         )
 
+        # PATRÓN 3: INSTITUTIONAL TREND WAVE (Ola de tendencia con alta confluencia institucional >= 7/10)
+        # Para CALL:
+        # - Macro 5M alcista + SuperTrend 1M alcista + EMA Ribbon 1M alcista + ADX confirmando tendencia (>= 0)
+        # - Al menos 7 de las 10 estrategias votan simultáneamente a favor de CALL
+        # - RSI dinámico entre 52 y 66 (espacio de recorrido, lejos de agotamiento > 70)
+        # - Cierre dentro de bandas de Bollinger (c_1m < upper_bb)
+        # - Vela 1M verde con cuerpo sólido (c_1m > o_1m, body_ratio >= 0.40)
+        # - Sin mecha superior de rechazo violento (upper_wick_ratio <= 0.30)
+        is_trend_wave_call = (
+            macro_bias == "CALL" and st_1m > 0.0 and ema_1m > 0.0 and adx_1m >= 0.0 and
+            v_call >= 7 and
+            52.0 <= rsi_val <= 66.0 and
+            c_1m < upper_bb and
+            c_1m > o_1m and
+            body_ratio >= 0.40 and
+            upper_wick_ratio <= 0.30 and
+            not is_climactic_spike and not is_dead_market
+        )
+
+        # Para PUT:
+        # - Macro 5M bajista + SuperTrend 1M bajista + EMA Ribbon 1M bajista + ADX confirmando tendencia (<= 0)
+        # - Al menos 7 de las 10 estrategias votan simultáneamente a favor de PUT
+        # - RSI dinámico entre 34 y 48 (espacio de caída, lejos de agotamiento < 30)
+        # - Cierre dentro de bandas de Bollinger (c_1m > lower_bb)
+        # - Vela 1M roja con cuerpo sólido (c_1m < o_1m, body_ratio >= 0.40)
+        # - Sin mecha inferior de rechazo violento (lower_wick_ratio <= 0.30)
+        is_trend_wave_put = (
+            macro_bias == "PUT" and st_1m < 0.0 and ema_1m < 0.0 and adx_1m <= 0.0 and
+            v_put >= 7 and
+            34.0 <= rsi_val <= 48.0 and
+            c_1m > lower_bb and
+            c_1m < o_1m and
+            body_ratio >= 0.40 and
+            lower_wick_ratio <= 0.30 and
+            not is_climactic_spike and not is_dead_market
+        )
+
         # =========================================================================
         # DECISIÓN FINAL DEL MOTOR
         # =========================================================================
@@ -297,25 +350,37 @@ class EnsembleEngine:
             final_prob_call = 94.5
             final_prob_put = 5.5
             final_prob = final_prob_call
-            confluence_text = f"🎯 [PATRÓN A] PULLBACK ALCISTA EN EMA: Rechazo institucional (Mecha inferior: {lower_wick_ratio*100:.0f}% | {v_call}/10 estrategias a favor)"
+            confluence_text = f"🎯 [PATRÓN A] PULLBACK ALCISTA EN EMA: Rebote en zona de valor (Mecha inferior: {lower_wick_ratio*100:.0f}% | {v_call}/10 a favor)"
         elif is_pinbar_call:
             final_action = "CALL"
             final_prob_call = 92.0
             final_prob_put = 8.0
             final_prob = final_prob_call
             confluence_text = f"⚡ [PATRÓN B] REVERSIÓN SNIPER EN SUELO: Pinbar de rechazo en banda inferior Bollinger (RSI: {rsi_val:.1f})"
+        elif is_trend_wave_call:
+            final_action = "CALL"
+            final_prob_call = 89.0
+            final_prob_put = 11.0
+            final_prob = final_prob_call
+            confluence_text = f"🌊 [PATRÓN C] IMPULSO INSTITUCIONAL ALCISTA: Confluencia alta ({v_call}/10 estrategias a favor | ADX y EMAs alineados)"
         elif is_pullback_put:
             final_action = "PUT"
             final_prob_put = 94.5
             final_prob_call = 5.5
             final_prob = final_prob_put
-            confluence_text = f"🎯 [PATRÓN A] PULLBACK BAJISTA EN EMA: Rechazo institucional (Mecha superior: {upper_wick_ratio*100:.0f}% | {v_put}/10 estrategias a favor)"
+            confluence_text = f"🎯 [PATRÓN A] PULLBACK BAJISTA EN EMA: Rechazo en zona de valor (Mecha superior: {upper_wick_ratio*100:.0f}% | {v_put}/10 a favor)"
         elif is_pinbar_put:
             final_action = "PUT"
             final_prob_put = 92.0
             final_prob_call = 8.0
             final_prob = final_prob_put
             confluence_text = f"⚡ [PATRÓN B] REVERSIÓN SNIPER EN TECHO: Pinbar de rechazo en banda superior Bollinger (RSI: {rsi_val:.1f})"
+        elif is_trend_wave_put:
+            final_action = "PUT"
+            final_prob_put = 89.0
+            final_prob_call = 11.0
+            final_prob = final_prob_put
+            confluence_text = f"🌊 [PATRÓN C] IMPULSO INSTITUCIONAL BAJISTA: Confluencia alta ({v_put}/10 estrategias a favor | ADX y EMAs alineados)"
         else:
             final_action = "EN ESPERA"
             final_prob_call = 50.0

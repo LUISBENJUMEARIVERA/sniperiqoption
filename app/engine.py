@@ -193,6 +193,12 @@ class TradingEngine:
                         
                     raw_name = data.get('name', '')
                     clean_name = raw_name.replace('front.', '')
+                    
+                    # PROHIBICIÓN ABSOLUTA DE DIGITAL OPTIONS (-op):
+                    # En Digital Options los empates son pérdidas automáticas y el broker desvía el strike
+                    if clean_name.endswith('-op'):
+                        continue
+                        
                     base = clean_name.replace('-op', '').replace('-OTC', '')
                     
                     # Filtro estricto de pares de divisas Forex auténticos y materias primas / cripto mayores
@@ -236,10 +242,12 @@ class TradingEngine:
 
         self._refresh_live_catalog()
         
-        # 1. Extraer símbolo base (ej. EURUSD) y seleccionar la versión abierta (-op, -OTC) que más pague
+        # 1. Extraer símbolo base (ej. EURUSD) y seleccionar la versión binaria/OTC que más pague (excluyendo Digital -op)
         base = asset.replace("-op", "").replace("-OTC", "")
         candidates = []
         for name, info in self.open_instruments_cache.items():
+            if name.endswith("-op"):
+                continue
             if info.get('base') == base:
                 candidates.append((name, info.get('payout', 0.0)))
 
@@ -247,8 +255,8 @@ class TradingEngine:
             candidates.sort(key=lambda x: x[1], reverse=True)
             return candidates[0][0], candidates[0][1]
 
-        # 2. Si el símbolo exacto está en el catálogo verificado de abiertos
-        if asset in self.open_instruments_cache:
+        # 2. Si el símbolo exacto está en el catálogo verificado de abiertos y no es digital
+        if asset in self.open_instruments_cache and not asset.endswith("-op"):
             info = self.open_instruments_cache[asset]
             return asset, info.get('payout', 0.0)
 
@@ -311,9 +319,9 @@ class TradingEngine:
 
             selected = [c['symbol'] for c in candidates[:max_count]]
 
-            # Fallback seguro en caso extremo
+            # Fallback seguro en caso extremo (solo binarias estándar y OTC puras)
             if not selected:
-                selected = ["EURUSD-op", "GBPUSD-op", "EURJPY-op", "USDJPY-op", "EURGBP-op", "GBPJPY-op", "AUDUSD-op", "USDCAD-op"]
+                selected = ["EURUSD-OTC", "GBPUSD-OTC", "EURJPY-OTC", "USDJPY-OTC", "EURGBP-OTC", "GBPJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC"]
 
             old_set = set(self.config.assets) if self.config.assets else set()
             new_set = set(selected)
@@ -597,23 +605,41 @@ class TradingEngine:
             target_asset = asset
             payout = 86.0
 
-        # FILTRO DE SEGURIDAD ESTRICTO: Evaluar con el motor Multi-Timeframe institucional (5M y 1M)
-        df_5m = self._fetch_asset_candles(target_asset, count=60, timeframe_sec=300)
+        # FILTRO DE SEGURIDAD ESTRICTO: Evaluar estructura tras la vela de pérdida
         df_1m = self._fetch_asset_candles(target_asset, count=40, timeframe_sec=60)
-        eval_mtf = self.ensemble.evaluate_mtf(df_5m, df_1m)
-        votes = eval_mtf.get("votes", {})
+        eval_1m = self.ensemble.evaluate(df_1m)
+        votes = eval_1m.get("votes", {})
         
+        st_vote = votes.get("SuperTrend Volatility", 0.0)
+        ema_vote = votes.get("Triple EMA Ribbon", 0.0)
         m_key = base_asset if base_asset in self.martingale_state else asset
-        eval_action = eval_mtf.get("dominant_action")
 
-        # REQUISITO EXIGENTE DE RECUPERACIÓN: Solo entrar si se confirma un Setup A o Setup B al cierre
-        if eval_action in ["CALL", "PUT"]:
-            recov_action = eval_action
-            recov_prob = eval_mtf["dominant_probability"]
-            count_fav = sum(1 for v in votes.values() if (recov_action == "CALL" and v > 0) or (recov_action == "PUT" and v < 0))
-            print(f">> 🎯 [REENTRADA VALIDADA POR SETUP] {target_asset}: Patrón confirmado hacia {recov_action} ({count_fav}/10 a favor | Prob: {recov_prob:.1f}%).")
+        # VETO DE SEGURIDAD CONTRA RUPTURAS VIOLENTAS:
+        # - Para CALL: SuperTrend Y Triple EMA se volvieron negativos (ruptura bajista)
+        # - Para PUT: SuperTrend Y Triple EMA se volvieron positivos (ruptura alcista)
+        has_structural_break = (action == "CALL" and st_vote < 0 and ema_vote < 0) or \
+                               (action == "PUT" and st_vote > 0 and ema_vote > 0)
+
+        opposite_action = "PUT" if action == "CALL" else "CALL"
+        fav_orig = sum(1 for v in votes.values() if (action == "CALL" and v > 0) or (action == "PUT" and v < 0))
+        fav_opp = sum(1 for v in votes.values() if (opposite_action == "CALL" and v > 0) or (opposite_action == "PUT" and v < 0))
+
+        # DECISIÓN INTELIGENTE DE RECUPERACIÓN G1 (FILTRO DE CONSENSO MATEMÁTICO ESTRICTO):
+        # 1. Si el mercado giró con mayoría contundente (>= 6/10) a favor de la dirección opuesta:
+        if fav_opp >= 6 and eval_1m.get("dominant_action") == opposite_action:
+            recov_action = opposite_action
+            recov_prob = eval_1m.get("dominant_probability", 82.0)
+            count_fav = fav_opp
+            print(f">> 🔄 [MARTINGALA ADAPTADA AL GIRO] {target_asset}: Mercado volcado a {recov_action} ({count_fav}/10 a favor). Disparando recuperación en nueva dirección...")
+        # 2. Si la tesis original se mantiene con apoyo mayoritario (>= 5/10) y SIN ruptura estructural:
+        elif fav_orig >= 5 and not has_structural_break:
+            recov_action = action
+            recov_prob = eval_1m.get("prob_call" if action == "CALL" else "prob_put", 80.0)
+            count_fav = fav_orig
+            print(f">> ⚡ [MARTINGALA G{next_level} CONFIRMADA] {target_asset}: Tesis {action} vigente ({count_fav}/10 a favor | Prob: {recov_prob:.1f}%). Disparando reentrada inmediata...")
+        # 3. VETO TOTAL: Si menos de 5 estrategias apoyan o hubo ruptura violenta, ABORTAR INMEDIATAMENTE
         else:
-            print(f"\n>> 🛡️🛑 [MARTINGALA ABORTADA POR SEGURIDAD] {target_asset}: Sin setup institucional al cierre ({eval_mtf['confluence_text']}). Reentrada G{next_level} cancelada para proteger capital.")
+            print(f"\n>> 🛡️🛑 [MARTINGALA ABORTADA POR SEGURIDAD] {target_asset}: Pérdida de consenso estadístico ({fav_orig}/10 a favor de {action}, {fav_opp}/10 a favor de {opposite_action}). Reentrada G{next_level} cancelada para proteger capital.")
             if m_key in self.martingale_state:
                 self.martingale_state[m_key]["current_level"] = 0
                 self.martingale_state[m_key]["next_amount"] = self.config.amount
@@ -646,10 +672,6 @@ class TradingEngine:
                 return False
         else:
             print(f"\n>> 🔥⚡ [SIMULADOR LOCAL - REENTRADA G{next_level}] #{trade_uid} | {recov_action} en {asset} | Importe: ${amount:.2f} ({count_fav}/10 a favor) | Payout: {payout:.0f}%\n")
-
-        # Conteo real de estrategias a favor
-        count_fav = sum(1 for v in votes.values() if (recov_action == "CALL" and v > 0) or (recov_action == "PUT" and v < 0))
-        recov_prob = max(80.0, eval_1m["dominant_probability"])
 
         # Registrar de inmediato en la base de datos con los votos reales de las 10 estrategias
         record_trade(
