@@ -202,6 +202,24 @@ def resolve_trade(trade_uid: str, result: str, profit: float):
     conn.commit()
     conn.close()
 
+def mark_trade_recovered(trade_uid: str):
+    """
+    Marca una operación G0 inicial como 'RECOVERED' cuando su reentrada G1 gana,
+    manteniendo intacto su profit negativo para que SUM(profit) sea 100% exacto al centavo,
+    mientras el Win Rate refleja la tasa real de ciclos ganadores.
+    """
+    if not trade_uid:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE trades
+    SET result = 'RECOVERED'
+    WHERE trade_uid = ? AND result = 'LOSS'
+    """, (trade_uid,))
+    conn.commit()
+    conn.close()
+
 def get_kpi_summary() -> Dict[str, Any]:
     conn = get_connection()
     cursor = conn.cursor()
@@ -221,7 +239,8 @@ def get_kpi_summary() -> Dict[str, Any]:
     cursor.execute("SELECT COUNT(*) FROM trades WHERE result = 'PENDING'")
     active_pending = cursor.fetchone()[0]
     
-    win_rate = round((total_wins / total_completed * 100.0), 1) if total_completed > 0 else 0.0
+    effective_cycles = total_wins + total_losses
+    win_rate = round((total_wins / effective_cycles * 100.0), 1) if effective_cycles > 0 else 0.0
     
     conn.close()
     return {
@@ -293,7 +312,8 @@ def get_historical_analysis(start_date: Optional[str] = None, end_date: Optional
     cursor.execute(f"SELECT COALESCE(SUM(profit), 0.0) FROM trades WHERE {where_sql}", params)
     net_profit = round(cursor.fetchone()[0], 2)
     
-    win_rate = round((total_wins / total_trades * 100.0), 1) if total_trades > 0 else 0.0
+    effective_cycles = total_wins + total_losses
+    win_rate = round((total_wins / effective_cycles * 100.0), 1) if effective_cycles > 0 else 0.0
     
     # Operaciones del rango (incluyendo pendientes)
     trade_where = []

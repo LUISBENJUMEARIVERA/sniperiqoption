@@ -20,7 +20,7 @@ from datetime import datetime
 from app.config import BotConfig, DEFAULT_ASSETS
 from app.ensemble import EnsembleEngine
 from app.optimizer import StrategyOptimizer
-from app.database import record_trade, resolve_trade, get_kpi_summary
+from app.database import record_trade, resolve_trade, mark_trade_recovered, get_kpi_summary
 
 logger = logging.getLogger("AutoTrader.Engine")
 
@@ -42,15 +42,25 @@ class TradingEngine:
         self.current_prices: Dict[str, float] = {}
         self.last_trade_candles: Dict[str, int] = {}
         self.last_global_trade_candle: int = -1
+        self._iq_lock = threading.Lock()
         self._candles_5m_cache: Dict[str, Dict[str, Any]] = {}
+        self._candles_1m_cache: Dict[str, Dict[str, Any]] = {}
+        self._calibration_cache: Dict[str, float] = {}
+        self._calibration_df_cache: Dict[str, pd.DataFrame] = {}
         self.open_instruments_cache: Dict[str, Dict[str, Any]] = {}
         self.last_catalog_refresh: float = 0.0
         self.active_trades: Dict[str, Dict[str, Any]] = {}
         self.assets_signals: Dict[str, Dict[str, Any]] = {}
         
-        # Estado individual de Martingala por activo (se sincroniza dinámicamente)
+        # Estado individual y global de Recuperación Cuantitativa Walk-Forward (estrictamente máximo G1)
         self.martingale_state: Dict[str, Dict[str, Any]] = {}
-        self.assets_signals: Dict[str, Dict[str, Any]] = {}
+        self.portfolio_recovery: Dict[str, Any] = {
+            "active": False,
+            "level": 0,
+            "amount": self.config.amount,
+            "lost_trade_uid": None,
+            "lost_asset": None
+        }
         
         self.current_state = {
             "status": "STOPPED",
@@ -149,12 +159,14 @@ class TradingEngine:
 
     def _refresh_live_catalog(self, force: bool = False):
         """
-        Escaneo Forense del Catálogo Real de IQ Option en Vivo:
-        1. Consulta get_all_init_v2() para examinar turbo y binary.
+        Escaneo Forense del Catálogo Real de IQ Option en Vivo (Opciones Turbo 1M):
+        1. Consulta get_all_init_v2() enfocándose en el catálogo 'turbo' (1M a 5M) para garantizar
+           que todos los instrumentos seleccionados acepten expiraciones de 1 minuto.
         2. Filtra ESTRICTAMENTE activos con enabled=True e is_suspended=False.
-        3. Registra dinámicamente sus IDs en OP_code.ACTIVES para habilitar la orden de compra.
+        3. Registra dinámicamente sus IDs en OP_code.ACTIVES para habilitar la orden de compra
+           (incluyendo futuros reales CME como USNDAQ100:N, USSPX500:N, US2000:N, US30:N, SPX/Gold, XAU/XAG,
+           pares Forex reales y sintéticos OTC de alta liquidez).
         4. Cruza con get_all_profit() para capturar el Payout exacto al instante.
-        5. Actualiza self.open_instruments_cache con los activos 100% operativos.
         """
         if self.config.use_simulator or not self.iq:
             return
@@ -165,8 +177,9 @@ class TradingEngine:
 
         try:
             import iqoptionapi.constants as OP_code
-            init = self.iq.get_all_init_v2()
-            profits = self.iq.get_all_profit()
+            with self._iq_lock:
+                init = self.iq.get_all_init_v2()
+                profits = self.iq.get_all_profit()
             
             if not init or not profits:
                 return
@@ -177,7 +190,11 @@ class TradingEngine:
             new_cache = {}
             currencies = ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "CAD", "NZD"]
 
-            for category, cat_dict in [('turbo', turbo), ('binary', binary)]:
+            # Priorizar estrictamente el catálogo 'turbo' porque operamos velas de 1M (duration=1).
+            # Solo usar 'binary' como respaldo si 'turbo' viniera vacío.
+            catalog_sources = [('turbo', turbo)] if turbo else [('binary', binary)]
+
+            for category, cat_dict in catalog_sources:
                 for aid_str, data in cat_dict.items():
                     try:
                         aid = int(aid_str)
@@ -195,23 +212,24 @@ class TradingEngine:
                     clean_name = raw_name.replace('front.', '')
                     
                     # PROHIBICIÓN ABSOLUTA DE DIGITAL OPTIONS (-op):
-                    # En Digital Options los empates son pérdidas automáticas y el broker desvía el strike
                     if clean_name.endswith('-op'):
                         continue
                         
                     base = clean_name.replace('-op', '').replace('-OTC', '')
-                    
-                    # Filtro estricto de pares de divisas Forex auténticos y materias primas / cripto mayores
                     is_forex = (len(base) == 6 and base[:3] in currencies and base[3:6] in currencies)
-                    is_tradable = is_forex or base in ["XAUUSD", "BTCUSD"]
+                    is_real_market = not clean_name.endswith('-OTC')
                     
                     p_data = profits.get(clean_name, {})
-                    payout_val = p_data.get(category) or p_data.get('turbo') or p_data.get('binary') or 0.0
+                    payout_val = p_data.get('turbo') or p_data.get(category) or p_data.get('binary') or 0.0
                     payout_pct = round(payout_val * 100.0 if payout_val <= 1.0 else payout_val, 1)
                     
-                    # Inyección dinámica en ACTIVES de la librería para que buy() nunca falle
+                    # Todo activo Turbo 1M habilitado, no suspendido y con payout >= 75% es candidato
+                    # a la validación empírica Walk-Forward (índices CME reales, commodities, divisas y pares OTC)
+                    is_tradable = (payout_pct >= 75.0)
+                    
+                    # Inyección dinámica en ACTIVES de la librería para que buy() y get_candles() nunca fallen
                     OP_code.ACTIVES[clean_name] = aid
-                    if base not in OP_code.ACTIVES:
+                    if is_real_market and base not in OP_code.ACTIVES:
                         OP_code.ACTIVES[base] = aid
                         
                     if clean_name not in new_cache or payout_pct > new_cache[clean_name]['payout']:
@@ -220,6 +238,7 @@ class TradingEngine:
                             'payout': payout_pct,
                             'base': base,
                             'is_forex': is_forex,
+                            'is_real_market': is_real_market,
                             'is_tradable': is_tradable,
                             'category': category,
                             'raw_name': raw_name
@@ -234,48 +253,51 @@ class TradingEngine:
     def _resolve_target_asset(self, asset: str) -> tuple:
         """
         Mapeo y Redireccionamiento Inteligente en Vivo:
-        Toma cualquier símbolo (ej. 'EURUSD', 'EURUSD-OTC', 'EURUSD-op') y devuelve
-        el activo que REALMENTE está abierto (no suspendido) con el mayor payout en este momento.
+        Prioriza coincidencia exacta en el catálogo Turbo abierto; si no existe,
+        busca por símbolo base la variante abierta con mayor payout (excluyendo -op).
         """
         if self.config.use_simulator or not self.iq:
             return asset, 86.0
 
         self._refresh_live_catalog()
-        
-        # 1. Extraer símbolo base (ej. EURUSD) y seleccionar la versión binaria/OTC que más pague (excluyendo Digital -op)
+
+        # 1. Coincidencia exacta en el catálogo Turbo verificado de abiertos
+        if asset in self.open_instruments_cache and not asset.endswith("-op"):
+            info = self.open_instruments_cache[asset]
+            return asset, info.get('payout', 0.0)
+
+        # 2. Fallback por símbolo base (ej. EURUSD -> EURUSD o EURUSD-OTC)
         base = asset.replace("-op", "").replace("-OTC", "")
         candidates = []
         for name, info in self.open_instruments_cache.items():
             if name.endswith("-op"):
                 continue
             if info.get('base') == base:
-                candidates.append((name, info.get('payout', 0.0)))
+                # Preferir mercado real sobre OTC a igual payout
+                is_real = 1 if info.get('is_real_market') else 0
+                candidates.append((name, info.get('payout', 0.0), is_real))
 
         if candidates:
-            candidates.sort(key=lambda x: x[1], reverse=True)
+            candidates.sort(key=lambda x: (x[2], x[1]), reverse=True)
             return candidates[0][0], candidates[0][1]
-
-        # 2. Si el símbolo exacto está en el catálogo verificado de abiertos y no es digital
-        if asset in self.open_instruments_cache and not asset.endswith("-op"):
-            info = self.open_instruments_cache[asset]
-            return asset, info.get('payout', 0.0)
 
         return None, 0.0
 
-    def _auto_discover_top_assets(self, min_count: int = 15, max_count: int = 25, silent: bool = False) -> List[str]:
+    def _auto_discover_top_assets(self, min_count: int = 12, max_count: int = 16, silent: bool = False) -> List[str]:
         """
-        Radar Cuantitativo Multi-Activo de Gran Amplitud (20 a 25 pares en simultáneo):
-        1. Refresca el catálogo real de IQ Option (solo enabled=True, is_suspended=False).
-        2. Filtra pares Forex, OTC, Oro y Cripto institucional con payout >= min_payout.
-        3. Deduplica por par base seleccionando la versión con mayor payout.
-        4. Ordena por mayor retorno y mantiene hasta 25 pares vigilados en paralelo.
+        Radar Cuantitativo Multi-Activo con Calibración Walk-Forward en Vivo:
+        1. Refresca el catálogo real Turbo 1M de IQ Option (enabled=True, is_suspended=False).
+        2. Prioriza feeds de Mercado Real (futuros CME USNDAQ100:N, USSPX500:N, US2000:N, US30:N,
+           SPX/Gold, XAU/XAG, Forex spot) y pares Turbo de alto Payout (>=80%).
+        3. Calibra cada activo en doble ventana histórica independiente (W1 y W2 de 1M) para
+           seleccionar únicamente los activos donde las estrategias S1..S9 tienen ventaja
+           estadística demostrada (>55.5% Real / >58.5% OTC en ambas mitades, >83% Ciclo G1).
         """
         if self.config.use_simulator or not self.iq:
             default_pool = [
+                "USNDAQ100:N", "USSPX500:N", "US2000:N", "US30:N", "SPX/Gold", "XAU/XAG",
                 "EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "EURJPY-OTC", "EURGBP-OTC", 
-                "USDCHF-OTC", "NZDUSD-OTC", "GBPJPY-OTC", "AUDCAD-OTC", "AUDUSD-OTC",
-                "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURJPY", 
-                "USDCAD", "EURGBP", "USDCHF", "GBPJPY", "AUDCAD", "XAUUSD", "BTCUSD"
+                "USDCHF-OTC", "NZDUSD-OTC", "GBPJPY-OTC", "AUDCAD-OTC", "AUDUSD-OTC"
             ]
             self.config.assets = default_pool[:max_count]
             self.current_state["active_assets"] = self.config.assets
@@ -283,43 +305,110 @@ class TradingEngine:
 
         try:
             self._refresh_live_catalog(force=True)
+            now_ts = time.time()
 
-            # Agrupar por par base para evitar duplicados y elegir la versión que más paga y que esté abierta
+            # Agrupar por par base priorizando versión de Mercado Real y mayor Payout
             base_groups = {}
             for name, info in self.open_instruments_cache.items():
-                if not info.get('is_tradable', info.get('is_forex', False)):
+                if not info.get('is_tradable', False):
                     continue
                 payout = info.get('payout', 0.0)
                 if payout < self.config.min_payout:
                     continue
                 
                 base = info.get('base')
-                if base not in base_groups or payout > base_groups[base]['payout']:
+                is_real = info.get('is_real_market', False)
+                if base not in base_groups or (is_real, payout) > (base_groups[base]['is_real'], base_groups[base]['payout']):
                     base_groups[base] = {
                         'symbol': name,
                         'payout': payout,
-                        'base': base
+                        'base': base,
+                        'is_real': is_real
                     }
 
             candidates = list(base_groups.values())
-            candidates.sort(key=lambda x: x['payout'], reverse=True)
+            candidates.sort(key=lambda x: (1 if x['is_real'] else 0, x['payout']), reverse=True)
 
-            # Si hay menos de min_count, relajar temporalmente al 75%
-            if len(candidates) < min_count:
-                for name, info in self.open_instruments_cache.items():
-                    if not info.get('is_tradable', info.get('is_forex', False)):
+            # Calibrar candidatos en doble ventana Walk-Forward (con caché de 15 min para no bloquear el bucle)
+            max_calibrations_this_pass = 36 if not silent else 2
+            calibrations_done = 0
+            validated_count = sum(
+                1 for c in candidates
+                if self.ensemble.calibrated_assets.get(c['symbol'], {}).get('is_validated', False)
+            )
+
+            for c in candidates[:38]:
+                sym = c['symbol']
+                last_cal = self._calibration_cache.get(sym, 0.0)
+                if (now_ts - last_cal) < 900 and sym in self.ensemble.calibrated_assets:
+                    continue
+                if calibrations_done >= max_calibrations_this_pass:
+                    break
+                # En el arranque inicial, una vez tengamos suficientes activos validados WF, no demorar más
+                if not silent and validated_count >= max_count and calibrations_done >= 16:
+                    break
+
+                try:
+                    with self._iq_lock:
+                        raw = self.iq.get_candles(sym, 60, 1000, now_ts)
+                    if raw and len(raw) >= 260:
+                        df_h = pd.DataFrame(raw)
+                        df_h.rename(columns={'from': 'timestamp', 'min': 'low', 'max': 'high', 'volume': 'vol'}, inplace=True)
+                        # Excluir la vela en formación actual para calibrar solo sobre velas 100% cerradas
+                        df_closed = df_h.iloc[:-1].reset_index(drop=True)
+                        self._calibration_df_cache[sym] = df_closed
+                        cal_info = self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=55.5, min_otc_wr=58.5)
+                        self._calibration_cache[sym] = now_ts
+                        calibrations_done += 1
+                        if cal_info.get('is_validated'):
+                            validated_count += 1
+                        # Pre-poblar caché 1M en RAM con las últimas 90 velas cerradas
+                        if len(df_closed) >= 90:
+                            df_90 = df_closed.iloc[-90:].reset_index(drop=True)
+                            self._candles_1m_cache[sym] = {
+                                "closed_ts": int(df_90["timestamp"].iloc[-1]),
+                                "time": now_ts,
+                                "df": df_90
+                            }
+                except Exception:
+                    pass
+
+            # Segunda pasada suave (54.0% Real / 56.5% OTC en ambas ventanas) si hay menos de min_count validados
+            current_validated = [
+                c for c in candidates
+                if self.ensemble.calibrated_assets.get(c['symbol'], {}).get('is_validated', False)
+            ]
+            if len(current_validated) < min_count:
+                for c in candidates:
+                    sym = c['symbol']
+                    if self.ensemble.calibrated_assets.get(sym, {}).get('is_validated', False):
                         continue
-                    payout = info.get('payout', 0.0)
-                    if payout >= 75.0:
-                        base = info.get('base')
-                        if base not in base_groups:
-                            base_groups[base] = {'symbol': name, 'payout': payout, 'base': base}
-                candidates = list(base_groups.values())
-                candidates.sort(key=lambda x: x['payout'], reverse=True)
+                    df_closed = self._calibration_df_cache.get(sym)
+                    if df_closed is not None:
+                        self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=54.0, min_otc_wr=56.5)
 
-            selected = [c['symbol'] for c in candidates[:max_count]]
+            # Puntuar y ordenar todos los candidatos priorizando:
+            # 1) Validados Walk-Forward en doble ventana (is_validated=True)
+            # 2) Mercados Reales (CME / Spot) y mayor Score de Win Rate fuera de muestra
+            # 3) Mayor Payout en vivo
+            scored_candidates = []
+            for c in candidates:
+                sym = c['symbol']
+                cal = self.ensemble.calibrated_assets.get(sym, {})
+                is_val = 1 if cal.get('is_validated', False) else 0
+                score = float(cal.get('score', 0.0))
+                is_real = 1 if c['is_real'] else 0
+                scored_candidates.append((is_val, score, is_real, c['payout'], sym))
 
-            # Fallback seguro en caso extremo (solo binarias estándar y OTC puras)
+            scored_candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
+
+            # Seleccionar preferentemente solo activos validados Walk-Forward (hasta max_count)
+            validated_syms = [x[4] for x in scored_candidates if x[0] == 1]
+            if len(validated_syms) >= 6:
+                selected = validated_syms[:max_count]
+            else:
+                selected = [x[4] for x in scored_candidates[:max_count]]
+
             if not selected:
                 selected = ["EURUSD-OTC", "GBPUSD-OTC", "EURJPY-OTC", "USDJPY-OTC", "EURGBP-OTC", "GBPJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC"]
 
@@ -343,22 +432,29 @@ class TradingEngine:
                         }
                     if a not in self.assets_signals:
                         p = self._get_asset_payout(a)
+                        cal = self.ensemble.calibrated_assets.get(a, {})
+                        val_strats = ", ".join(cal.get("validated", {}).keys())
+                        init_text = (
+                            f"✅ Validado WF (WR Ciclo: {cal.get('best_cycle_wr', 83.0):.1f}%) [{val_strats}]"
+                            if cal.get("is_validated") else
+                            "⏳ Sincronizando microestructura 1M..."
+                        )
                         self.assets_signals[a] = {
                             "asset": a,
                             "price": self.sim_prices.get(a.replace("-op","").replace("-OTC",""), 1.0850),
-                            "prob_call": 0.0,
-                            "prob_put": 0.0,
+                            "prob_call": 50.0,
+                            "prob_put": 50.0,
                             "dominant_action": "EN ESPERA",
-                            "dominant_probability": 0.0,
-                            "regime": "ANALIZANDO...",
+                            "dominant_probability": 50.0,
+                            "regime": "WALK-FORWARD ACTIVO" if cal.get("is_validated") else "ANALIZANDO...",
                             "macro_bias": "5M NEUTRAL",
                             "phase_label": "Iniciando",
-                            "martingale_level": 0,
-                            "next_amount": self.config.amount,
+                            "martingale_level": 1 if self.portfolio_recovery.get("active") else 0,
+                            "next_amount": self.portfolio_recovery.get("amount", self.config.amount) if self.portfolio_recovery.get("active") else self.config.amount,
                             "adaptive_threshold": float(self.config.min_probability),
                             "is_pullback": False,
                             "payout": p,
-                            "confluence_text": "⏳ Sincronizando datos de mercado...",
+                            "confluence_text": init_text,
                             "votes": {},
                             "updated_at": time.strftime("%H:%M:%S")
                         }
@@ -371,10 +467,16 @@ class TradingEngine:
                 self.current_state["assets_signals"] = self.assets_signals
 
                 print("\n========================================================")
-                print(f">> 🌐 [RADAR AUTÓNOMO DE MERCADO] Rotación completada ({len(selected)} pares activos reales verificados):")
+                print(f">> 🌐 [RADAR WALK-FORWARD DE MERCADO] Cartera calibrada ({len(selected)} activos Turbo 1M verificados):")
                 for a in selected:
                     p = self._get_asset_payout(a)
-                    print(f"   • {a:<16} | Payout en vivo: {p:.0f}% [DISPONIBLE PARA OPERAR]")
+                    cal = self.ensemble.calibrated_assets.get(a, {})
+                    mkt_tag = "REAL MARKET" if not a.endswith("-OTC") else "OTC FEED   "
+                    if cal.get("is_validated"):
+                        v_keys = ",".join(cal.get("validated", {}).keys())
+                        print(f"   • {a:<16} | {mkt_tag} | Payout: {p:.0f}% | WR Base: {cal['best_flat_wr']:.1f}% -> Ciclo G1: {cal['best_cycle_wr']:.1f}% [{v_keys}]")
+                    else:
+                        print(f"   • {a:<16} | {mkt_tag} | Payout: {p:.0f}% [DISPONIBLE PARA OPERAR]")
                 if added and silent:
                     print(f">> 🟢 [NUEVOS ACTIVOS ACTIVADOS] {', '.join(added)}")
                 if removed and silent:
@@ -386,23 +488,58 @@ class TradingEngine:
             logger.error("Error en auto-descubrimiento de activos: %s", e)
             return self.config.assets
 
-    def _fetch_asset_candles(self, asset: str, count: int = 80, timeframe_sec: int = 60) -> pd.DataFrame:
+    def _fetch_asset_candles(self, asset: str, count: int = 90, timeframe_sec: int = 60) -> pd.DataFrame:
         if not self.config.use_simulator and self.iq:
             target_asset, _ = self._resolve_target_asset(asset)
             target = target_asset or asset
+            now_ts = time.time()
 
             if timeframe_sec == 300:
                 cached = self._candles_5m_cache.get(target)
-                if cached and (time.time() - cached["time"] < 40):
+                if cached and (now_ts - cached["time"] < 50):
                     return cached["df"]
+            elif timeframe_sec == 60:
+                # Identificar el timestamp exacto de la última vela de 1M CERRADA:
+                # En el segundo 59 la vela actual ya cerró prácticamente; en segundos 00..58 la última cerrada es (minuto_actual - 1)
+                sec_1m = int(now_ts) % 60
+                curr_min = int(now_ts // 60)
+                closed_candle_id = curr_min if sec_1m >= 59 else (curr_min - 1)
+                expected_closed_ts = closed_candle_id * 60
+
+                cached_1m = self._candles_1m_cache.get(target)
+                if cached_1m and cached_1m.get("closed_ts") == expected_closed_ts and (now_ts - cached_1m.get("time", 0) < 35):
+                    return cached_1m["df"]
 
             try:
-                raw = self.iq.get_candles(target, timeframe_sec, count, time.time())
+                with self._iq_lock:
+                    raw = self.iq.get_candles(target, timeframe_sec, count + 2, now_ts)
                 if raw and len(raw) >= 30:
                     df = pd.DataFrame(raw)
                     df.rename(columns={'from': 'timestamp', 'min': 'low', 'max': 'high', 'volume': 'vol'}, inplace=True)
+                    # Actualizar precio en vivo al instante con el último tick recibido
+                    live_px = float(df["close"].iloc[-1])
+                    self.current_prices[asset] = live_px
+                    self.current_prices[target] = live_px
+
                     if timeframe_sec == 300:
-                        self._candles_5m_cache[target] = {"time": time.time(), "df": df}
+                        self._candles_5m_cache[target] = {"time": now_ts, "df": df}
+                        return df
+                    elif timeframe_sec == 60:
+                        sec_1m = int(now_ts) % 60
+                        curr_min = int(now_ts // 60)
+                        closed_candle_id = curr_min if sec_1m >= 59 else (curr_min - 1)
+                        expected_closed_ts = closed_candle_id * 60
+                        # CRÍTICO: Excluir la vela recién nacida en formación (segundos 00..58)
+                        # para evaluar SIEMPRE la vela 1M que acaba de cerrar al 100%
+                        df_closed = df[df["timestamp"] <= expected_closed_ts].reset_index(drop=True)
+                        if len(df_closed) < 30:
+                            df_closed = df.iloc[:-1].reset_index(drop=True)
+                        self._candles_1m_cache[target] = {
+                            "closed_ts": int(df_closed["timestamp"].iloc[-1]),
+                            "time": now_ts,
+                            "df": df_closed
+                        }
+                        return df_closed
                     return df
             except Exception:
                 pass
@@ -475,7 +612,8 @@ class TradingEngine:
 
         # 2. Intentar por historial oficial de opciones cerradas (get_optioninfo_v2)
         try:
-            history = self.iq.get_optioninfo_v2(15)
+            with self._iq_lock:
+                history = self.iq.get_optioninfo_v2(15)
             if history and "msg" in history and "closed_options" in history["msg"]:
                 for opt in history["msg"]["closed_options"]:
                     if order_id in opt.get("id", []):
@@ -498,7 +636,7 @@ class TradingEngine:
         if not self.config.use_simulator and self.iq:
             target_asset, payout = self._resolve_target_asset(asset)
             if not target_asset:
-                print(f">> ⚠️ [ACTIVO CERRADO O SUSPENDIDO] {asset} no está abierto para opciones binarias en este horario. Operación evitada.")
+                print(f">> ⚠️ [ACTIVO CERRADO O SUSPENDIDO] {asset} no está abierto para opciones Turbo 1M en este horario. Operación evitada.")
                 return False
         else:
             target_asset = asset
@@ -511,31 +649,33 @@ class TradingEngine:
 
         trade_uid = str(uuid.uuid4())[:12]
         
-        # 3. DETERMINACIÓN DEL IMPORTE:
-        m_state = self.martingale_state.get(asset, {"current_level": 0, "next_amount": self.config.amount})
-        current_lvl = m_state.get("current_level", 0)
-        
-        if current_lvl > 0:
-            amount = float(m_state.get("next_amount", self.config.amount))
-            lvl_tag = f"[MARTINGALA G{current_lvl}] "
+        # 3. DETERMINACIÓN DEL IMPORTE (G0 Base o G1 Recuperación Walk-Forward de Cartera):
+        if self.config.use_martingale and self.portfolio_recovery.get("active", False):
+            current_lvl = 1
+            amount = float(self.portfolio_recovery.get("amount", round(self.config.amount * 2.15, 2)))
+            recovered_uid = self.portfolio_recovery.get("lost_trade_uid")
+            lvl_tag = "[RECUPERACIÓN WALK-FORWARD G1] "
         else:
+            current_lvl = 0
             amount = float(self.config.amount)
+            recovered_uid = None
             lvl_tag = ""
         
         expiration_min = 1
-        entry_price = snapshot.get("close", 0.0)
+        entry_price = self.current_prices.get(target_asset, snapshot.get("close", 0.0))
 
         # 4. ENVIAR ORDEN A IQ OPTION ANTES DE REGISTRARLA
         iq_order_id = None
         if not self.config.use_simulator and self.iq:
             try:
                 target_mode = "REAL" if (self.config.mode and self.config.mode.upper() == "REAL") else "PRACTICE"
-                if self.iq.get_balance_mode() != target_mode:
-                    self.iq.change_balance(target_mode)
-                    time.sleep(0.3)
-                
-                print(f"\n>> 🚀 {lvl_tag}[ENVIANDO A IQ OPTION ({target_mode})] #{trade_uid} | {action} en {target_asset} | Importe: ${amount:.2f} | Prob: {probability:.1f}% | Payout: {payout:.0f}%")
-                status, order_id = self.iq.buy(amount, target_asset, action.lower(), expiration_min)
+                with self._iq_lock:
+                    if self.iq.get_balance_mode() != target_mode:
+                        self.iq.change_balance(target_mode)
+                        time.sleep(0.2)
+                    
+                    print(f"\n>> 🚀 {lvl_tag}[ENVIANDO A IQ OPTION ({target_mode})] #{trade_uid} | {action} en {target_asset} | Importe: ${amount:.2f} | Prob Ciclo: {probability:.1f}% | Payout: {payout:.0f}%")
+                    status, order_id = self.iq.buy(amount, target_asset, action.lower(), expiration_min)
                 
                 # VERIFICACIÓN ESTRICTA: SI IQ OPTION RECHAZA LA ORDEN, NO SE REGISTRA
                 if not status or not isinstance(order_id, int):
@@ -548,9 +688,14 @@ class TradingEngine:
                 print(f">> [ERROR IQ OPTION] Excepción al enviar orden para {target_asset}: {e}. Operación cancelada.")
                 return False
         else:
-            print(f"\n>> 🔥 {lvl_tag}[SIMULADOR LOCAL] #{trade_uid} | {action} en {asset} | Importe: ${amount:.2f} | Prob: {probability:.1f}% | Payout: {payout:.0f}%\n")
+            print(f"\n>> 🔥 {lvl_tag}[SIMULADOR LOCAL] #{trade_uid} | {action} en {asset} | Importe: ${amount:.2f} | Prob Ciclo: {probability:.1f}% | Payout: {payout:.0f}%\n")
         
         # 5. REGISTRAR ÚNICAMENTE TRAS CONFIRMACIÓN REAL DE IQ OPTION (O EN SIMULADOR)
+        snap_copy = dict(snapshot)
+        snap_copy["martingale_level"] = current_lvl
+        if recovered_uid:
+            snap_copy["recovered_uid"] = recovered_uid
+
         record_trade(
             trade_uid=trade_uid,
             asset=target_asset,
@@ -560,10 +705,14 @@ class TradingEngine:
             payout=payout,
             probability=probability,
             strategy_votes=votes,
-            market_snapshot=snapshot
+            market_snapshot=snap_copy
         )
         
-        expiry_timestamp = time.time() + 60
+        # Expiración exacta alineada al cierre de minuto de IQ Option (iqoptionapi/expiration.py)
+        now_order_ts = time.time()
+        sec_order = int(now_order_ts) % 60
+        min_order = int(now_order_ts // 60)
+        expiry_timestamp = float((min_order + (1 if sec_order < 30 else 2)) * 60)
         
         self.active_trades[trade_uid] = {
             "trade_uid": trade_uid,
@@ -577,140 +726,16 @@ class TradingEngine:
             "expiry_time": expiry_timestamp,
             "probability": probability,
             "macro_info": macro_info,
-            "martingale_level": current_lvl
+            "martingale_level": current_lvl,
+            "recovered_uid": recovered_uid
         }
 
-        # Desactivar bandera de reentrada inmediata
+        # Si acabamos de disparar la orden G1, desactivar la espera mientras está en curso
+        if current_lvl > 0:
+            self.portfolio_recovery["active"] = False
+
         if asset in self.martingale_state:
             self.martingale_state[asset]["immediate_reentry"] = False
-
-        return True
-
-    def _execute_martingale_recovery(self, asset: str, base_asset: str, action: str, amount: float, next_level: int) -> bool:
-        """
-        Ejecuta la orden de recuperación Martingala de forma INTELIGENTE e INMEDIATA tras confirmarse una pérdida.
-        Incluye VETO DE SEGURIDAD CONTRA ROMPIMIENTOS:
-        Si la vela que perdió rompió violentamente en contra (cambio de SuperTrend y EMAs), cancela
-        la reentrada para proteger el capital en lugar de quemar dinero contra la tendencia.
-        Si la tendencia se mantiene o hay rebote, dispara la recuperación con los votos reales de las 10 estrategias.
-        """
-        if not self.config.use_simulator and self.iq:
-            target_asset, payout = self._resolve_target_asset(asset)
-            if not target_asset:
-                target_asset, payout = self._resolve_target_asset(base_asset)
-            if not target_asset:
-                target_asset = asset
-                payout = 86.0
-        else:
-            target_asset = asset
-            payout = 86.0
-
-        # FILTRO DE SEGURIDAD ESTRICTO: Evaluar estructura tras la vela de pérdida
-        df_1m = self._fetch_asset_candles(target_asset, count=40, timeframe_sec=60)
-        eval_1m = self.ensemble.evaluate(df_1m)
-        votes = eval_1m.get("votes", {})
-        
-        st_vote = votes.get("SuperTrend Volatility", 0.0)
-        ema_vote = votes.get("Triple EMA Ribbon", 0.0)
-        m_key = base_asset if base_asset in self.martingale_state else asset
-
-        # VETO DE SEGURIDAD CONTRA RUPTURAS VIOLENTAS:
-        # - Para CALL: SuperTrend Y Triple EMA se volvieron negativos (ruptura bajista)
-        # - Para PUT: SuperTrend Y Triple EMA se volvieron positivos (ruptura alcista)
-        has_structural_break = (action == "CALL" and st_vote < 0 and ema_vote < 0) or \
-                               (action == "PUT" and st_vote > 0 and ema_vote > 0)
-
-        opposite_action = "PUT" if action == "CALL" else "CALL"
-        fav_orig = sum(1 for v in votes.values() if (action == "CALL" and v > 0) or (action == "PUT" and v < 0))
-        fav_opp = sum(1 for v in votes.values() if (opposite_action == "CALL" and v > 0) or (opposite_action == "PUT" and v < 0))
-
-        # DECISIÓN INTELIGENTE DE RECUPERACIÓN G1 (FILTRO DE CONSENSO MATEMÁTICO ESTRICTO):
-        # 1. Si el mercado giró con mayoría contundente (>= 6/10) a favor de la dirección opuesta:
-        if fav_opp >= 6 and eval_1m.get("dominant_action") == opposite_action:
-            recov_action = opposite_action
-            recov_prob = eval_1m.get("dominant_probability", 82.0)
-            count_fav = fav_opp
-            print(f">> 🔄 [MARTINGALA ADAPTADA AL GIRO] {target_asset}: Mercado volcado a {recov_action} ({count_fav}/10 a favor). Disparando recuperación en nueva dirección...")
-        # 2. Si la tesis original se mantiene con apoyo mayoritario (>= 5/10) y SIN ruptura estructural:
-        elif fav_orig >= 5 and not has_structural_break:
-            recov_action = action
-            recov_prob = eval_1m.get("prob_call" if action == "CALL" else "prob_put", 80.0)
-            count_fav = fav_orig
-            print(f">> ⚡ [MARTINGALA G{next_level} CONFIRMADA] {target_asset}: Tesis {action} vigente ({count_fav}/10 a favor | Prob: {recov_prob:.1f}%). Disparando reentrada inmediata...")
-        # 3. VETO TOTAL: Si menos de 5 estrategias apoyan o hubo ruptura violenta, ABORTAR INMEDIATAMENTE
-        else:
-            print(f"\n>> 🛡️🛑 [MARTINGALA ABORTADA POR SEGURIDAD] {target_asset}: Pérdida de consenso estadístico ({fav_orig}/10 a favor de {action}, {fav_opp}/10 a favor de {opposite_action}). Reentrada G{next_level} cancelada para proteger capital.")
-            if m_key in self.martingale_state:
-                self.martingale_state[m_key]["current_level"] = 0
-                self.martingale_state[m_key]["next_amount"] = self.config.amount
-                self.martingale_state[m_key]["immediate_reentry"] = False
-            return False
-
-        trade_uid = str(uuid.uuid4())[:12]
-        expiration_min = 1
-        entry_price = self.current_prices.get(asset, self.current_prices.get(target_asset, 0.0))
-        iq_order_id = None
-
-        if not self.config.use_simulator and self.iq:
-            try:
-                target_mode = "REAL" if (self.config.mode and self.config.mode.upper() == "REAL") else "PRACTICE"
-                if self.iq.get_balance_mode() != target_mode:
-                    self.iq.change_balance(target_mode)
-                    time.sleep(0.3)
-
-                print(f"\n>> ⚡⚡ [REENTRADA INTELIGENTE G{next_level}] #{trade_uid} | {recov_action} en {target_asset} ({target_mode}) | Importe: ${amount:.2f} ({count_fav}/10 a favor) | Payout: {payout:.0f}%")
-                status, order_id = self.iq.buy(amount, target_asset, recov_action.lower(), expiration_min)
-
-                if not status or not isinstance(order_id, int):
-                    print(f">> ⚠️ [REENTRADA RECHAZADA POR IQ OPTION] {target_asset}: {order_id}. No se registra operación fantasma.")
-                    return False
-
-                iq_order_id = order_id
-                print(f">> 🎯 [ORDEN DE RECUPERACIÓN CONFIRMADA IQ OPTION] #{trade_uid} en {target_asset}. Status: True, ID: {iq_order_id}\n")
-            except Exception as e:
-                print(f">> [ERROR IQ OPTION] Fallo enviando orden de recuperación para {target_asset}: {e}")
-                return False
-        else:
-            print(f"\n>> 🔥⚡ [SIMULADOR LOCAL - REENTRADA G{next_level}] #{trade_uid} | {recov_action} en {asset} | Importe: ${amount:.2f} ({count_fav}/10 a favor) | Payout: {payout:.0f}%\n")
-
-        # Registrar de inmediato en la base de datos con los votos reales de las 10 estrategias
-        record_trade(
-            trade_uid=trade_uid,
-            asset=target_asset,
-            action=recov_action,
-            amount=amount,
-            expiration_min=expiration_min,
-            payout=payout,
-            probability=recov_prob,
-            strategy_votes=votes,
-            market_snapshot={"close": entry_price, "martingale_level": next_level, "strategies_favor": count_fav}
-        )
-
-        expiry_timestamp = time.time() + 60
-
-        self.active_trades[trade_uid] = {
-            "trade_uid": trade_uid,
-            "order_id": iq_order_id,
-            "asset": target_asset,
-            "base_asset": base_asset,
-            "action": recov_action,
-            "amount": amount,
-            "payout": payout,
-            "entry_price": entry_price,
-            "expiry_time": expiry_timestamp,
-            "probability": recov_prob,
-            "macro_info": f"⚡ REENTRADA INTELIGENTE MARTINGALA G{next_level} ({count_fav}/10 a favor)",
-            "martingale_level": next_level
-        }
-
-        # Desactivar bandera de espera en el estado
-        if m_key in self.martingale_state:
-            self.martingale_state[m_key]["immediate_reentry"] = False
-
-        # Registrar la vela para no duplicar entradas estándar simultáneas en ese par
-        now_candle = int(time.time() // 60)
-        self.last_trade_candles[asset] = now_candle
-        self.last_trade_candles[target_asset] = now_candle
 
         return True
 
@@ -726,15 +751,16 @@ class TradingEngine:
 
         if not self.config.use_simulator and self.iq:
             try:
-                self.iq.change_balance(mode)
-                time.sleep(0.5)
-                act_mode = self.iq.get_balance_mode()
-                if act_mode != mode:
+                with self._iq_lock:
                     self.iq.change_balance(mode)
                     time.sleep(0.5)
                     act_mode = self.iq.get_balance_mode()
+                    if act_mode != mode:
+                        self.iq.change_balance(mode)
+                        time.sleep(0.5)
+                        act_mode = self.iq.get_balance_mode()
 
-                bal = float(self.iq.get_balance())
+                    bal = float(self.iq.get_balance())
                 self.demo_balance = bal
                 self.current_state["balance"] = bal
                 self.current_state["mode"] = f"{act_mode} ({'CUENTA REAL' if act_mode == 'REAL' else 'DEMO'})"
@@ -762,7 +788,7 @@ class TradingEngine:
         expired_ids = []
         
         for uid, trade in list(self.active_trades.items()):
-            if now >= trade["expiry_time"]:
+            if now >= trade["expiry_time"] + 0.8:
                 order_id = trade.get("order_id")
                 asset = trade["asset"]
                 base_asset = trade.get("base_asset", asset)
@@ -770,13 +796,14 @@ class TradingEngine:
                 amount = trade["amount"]
                 payout = trade["payout"]
                 current_lvl = trade.get("martingale_level", 0)
+                recovered_uid = trade.get("recovered_uid")
 
                 # Si está conectado a IQ Option, obtener el resultado oficial de los servidores
                 if not self.config.use_simulator and self.iq and order_id:
                     res, profit = self._resolve_iq_order(order_id)
                     if res is None:
-                        # Si aún no ha llegado la confirmación, esperar hasta 10 segundos
-                        if now - trade["expiry_time"] < 10:
+                        # Si aún no ha llegado la confirmación del cierre por WS, esperar hasta 12 segundos
+                        if now - trade["expiry_time"] < 12:
                             continue
                         # Fallback seguro
                         entry_price = trade["entry_price"]
@@ -794,17 +821,6 @@ class TradingEngine:
                 expired_ids.append(uid)
                 resolve_trade(trade_uid=uid, result=res, profit=profit)
 
-                # Auto-optimización cuántica continua de pesos tras cada operación
-                try:
-                    from app.optimizer import StrategyOptimizer
-                    opt = StrategyOptimizer(learning_rate=0.35)
-                    opt_res = opt.analyze_and_optimize()
-                    if opt_res.get("success"):
-                        self.ensemble.load_weights()
-                        logger.info("🧠 Auto-optimizador actualizó pesos del ensamble con éxito.")
-                except Exception as e:
-                    logger.debug("Optimización omitida: %s", e)
-
                 # Sincronizar balance real directamente desde IQ Option
                 if not self.config.use_simulator and self.iq:
                     self._sync_iq_balance()
@@ -812,49 +828,64 @@ class TradingEngine:
                     self.demo_balance = round(self.demo_balance + profit, 2)
                     self.current_state["balance"] = self.demo_balance
 
-                print(f">> ✅ [OPERACIÓN CERRADA #{uid}] {asset} -> {res} (${profit:+.2f}) | Saldo Real Demo: ${self.demo_balance:.2f}")
+                print(f">> ✅ [OPERACIÓN CERRADA #{uid}] {asset} (G{current_lvl}) -> {res} (${profit:+.2f}) | Saldo Real Demo: ${self.demo_balance:.2f}")
 
-                # LÓGICA DE REENTRADA / MARTINGALA AUTOMÁTICA
+                # GESTIÓN DE CICLO WALK-FORWARD Y RECUPERACIÓN INTELIGENTE G1 DE CARTERA
                 m_key = base_asset if base_asset in self.martingale_state else asset
                 if m_key not in self.martingale_state:
                     self.martingale_state[m_key] = {"current_level": 0, "next_amount": self.config.amount}
 
                 if res == "WIN":
-                    if self.config.use_martingale and current_lvl > 0:
-                        print(f">> 🎯 [MARTINGALA RECUPERADA] {m_key} ¡Ganó en nivel G{current_lvl}! Capital recuperado. Reset al importe base ${self.config.amount:.2f}")
+                    if current_lvl > 0:
+                        if recovered_uid:
+                            mark_trade_recovered(recovered_uid)
+                        print(f">> 🎯 [CICLO WALK-FORWARD RECUPERADO EN G1] {asset} ¡Ganó en nivel G{current_lvl} (+${profit:.2f})! Pérdida previa #{recovered_uid} compensada. Reset a base ${self.config.amount:.2f}")
+                    self.portfolio_recovery = {
+                        "active": False,
+                        "level": 0,
+                        "amount": self.config.amount,
+                        "lost_trade_uid": None,
+                        "lost_asset": None
+                    }
                     self.martingale_state[m_key]["current_level"] = 0
                     self.martingale_state[m_key]["next_amount"] = self.config.amount
                     self.martingale_state[m_key]["immediate_reentry"] = False
+
                 elif res == "LOSS":
-                    if self.config.use_martingale:
-                        # Límite estricto de seguridad: Máximo 1 nivel de recuperación (G1: x2 max)
-                        # Prohibido absolutamente escaladas suicidas a G2 o G3 que quemen el balance
-                        max_allowed_lvl = min(1, max(1, self.config.martingale_levels))
-                        if current_lvl < max_allowed_lvl:
-                            next_lvl = current_lvl + 1
-                            recov_amount = round(amount * self.config.martingale_multiplier, 2)
-                            self.martingale_state[m_key]["current_level"] = next_lvl
-                            self.martingale_state[m_key]["next_amount"] = recov_amount
-                            self.martingale_state[m_key]["immediate_reentry"] = True
-                            self.martingale_state[m_key]["last_action"] = action
-                            print(f">> ⚡ [MARTINGALA G{next_lvl}] Operación inicial cerrada en LOSS en {m_key}. Evaluando reentrada segura con ${recov_amount:.2f} (x2.0)...")
-                            # Ejecución instantánea con validación rigurosa de consenso
-                            self._execute_martingale_recovery(
-                                asset=asset,
-                                base_asset=base_asset,
-                                action=action,
-                                amount=recov_amount,
-                                next_level=next_lvl
-                            )
-                        else:
-                            print(f">> 🛑 [MARTINGALA FINALIZADA] {m_key} completó la reentrada permitida (G{max_allowed_lvl}). Reseteando a importe base ${self.config.amount:.2f}.")
-                            self.martingale_state[m_key]["current_level"] = 0
-                            self.martingale_state[m_key]["next_amount"] = self.config.amount
-                            self.martingale_state[m_key]["immediate_reentry"] = False
+                    if self.config.use_martingale and current_lvl == 0:
+                        # Activar Recuperación Walk-Forward G1 para la próxima señal validada de la cartera
+                        mult = max(2.15, float(self.config.martingale_multiplier))
+                        recov_amount = round(float(self.config.amount) * mult, 2)
+                        self.portfolio_recovery = {
+                            "active": True,
+                            "level": 1,
+                            "amount": recov_amount,
+                            "lost_trade_uid": uid,
+                            "lost_asset": asset
+                        }
+                        self.martingale_state[m_key]["current_level"] = 1
+                        self.martingale_state[m_key]["next_amount"] = recov_amount
+                        self.martingale_state[m_key]["immediate_reentry"] = True
+                        print(f">> ⚡ [RECUPERACIÓN WALK-FORWARD G1 ARMADA] Operación base #{uid} cerrada en LOSS en {asset}. Próxima señal validada Walk-Forward operará en G1 con ${recov_amount:.2f}...")
                     else:
-                        self.martingale_state[m_key]["current_level"] = 0
-                        self.martingale_state[m_key]["next_amount"] = self.config.amount
-                        self.martingale_state[m_key]["immediate_reentry"] = False
+                        # Límite estricto de seguridad: Jamás pasar de G1
+                        print(f">> 🛑 [TOPE DE SEGURIDAD G1 APLICADO] Ciclo finalizado en {asset}. Prohibido escalar a G2. Reseteando a importe base ${self.config.amount:.2f}.")
+                        self.portfolio_recovery = {
+                            "active": False,
+                            "level": 0,
+                            "amount": self.config.amount,
+                            "lost_trade_uid": None,
+                            "lost_asset": None
+                        }
+                        for k in self.martingale_state:
+                            self.martingale_state[k]["current_level"] = 0
+                            self.martingale_state[k]["next_amount"] = self.config.amount
+                            self.martingale_state[k]["immediate_reentry"] = False
+
+                elif res == "EQUAL":
+                    # Si un G1 empata ($0.00), mantener armada la recuperación G1 para la siguiente señal validada
+                    if current_lvl > 0 and recovered_uid:
+                        self.portfolio_recovery["active"] = True
 
         for uid in expired_ids:
             if uid in self.active_trades:
@@ -864,29 +895,33 @@ class TradingEngine:
         self.current_state["status"] = "RUNNING"
         self._connect_iq()
 
-        # Auto-descubrimiento inicial autónomo de los 8 a 12 mejores pares con mayor Payout (>=82%)
-        self._auto_discover_top_assets(min_count=8, max_count=12, silent=False)
+        # Auto-descubrimiento inicial autónomo y calibración Walk-Forward de los mejores activos Turbo 1M
+        self._auto_discover_top_assets(min_count=12, max_count=16, silent=False)
 
         while self.is_running:
             try:
                 now_ts = time.time()
                 
-                # Reloj Micro 1M
+                # Reloj Micro 1M y alineación estricta a vela 100% cerrada
                 second_of_1m = int(now_ts) % 60
                 seconds_remaining_1m = 60 - second_of_1m
-                current_candle_1m_id = int(now_ts // 60)
+                curr_min = int(now_ts // 60)
+                closed_candle_id = curr_min if second_of_1m >= 59 else (curr_min - 1)
+                
+                # Ventana de disparo ampliada (seg 59 de M y segs 00..05 de M+1):
+                # En todos estos segundos la vela M ya cerró y IQ Option asigna exactamente la expiración al cierre de M+1
+                is_trigger_window = (second_of_1m >= 59 or second_of_1m <= 5)
                 
                 # Reloj Macro 5M (0 a 4)
                 minute_of_5m = (int(now_ts) % 300) // 60
                 is_5m_expansion = (minute_of_5m in [0, 1, 2, 3])
-                is_trigger_window = (58 <= second_of_1m <= 59 or second_of_1m == 0)
-                
                 phase_label = f"Min {minute_of_5m + 1}/5 (Expansión)" if is_5m_expansion else "Min 5/5 (Agotamiento)"
                 
+                recov_badge = f" | ⚡ G1 ARMADO (${self.portfolio_recovery['amount']:.0f})" if self.portfolio_recovery.get("active") else ""
                 timing_status = (
-                    f"🔥 DISPARO MTF LISTO (1M seg {second_of_1m}/60 en {phase_label})"
+                    f"🔥 DISPARO WALK-FORWARD LISTO (Seg {second_of_1m:02d}/60{recov_badge})"
                     if is_trigger_window else
-                    f"⏳ Monitoreando ({phase_label} &bull; Cierre 1M en {seconds_remaining_1m}s)"
+                    f"⏳ Escaneando Cartera WF ({phase_label} &bull; Cierre 1M en {seconds_remaining_1m}s{recov_badge})"
                 )
                 
                 self.current_state["candle_timing"] = {
@@ -898,32 +933,30 @@ class TradingEngine:
                     "status_text": timing_status
                 }
 
-                # Revisar operaciones cerradas y calcular martingalas si corresponde
+                # 1. Revisar operaciones cerradas y armar/resetear G1 ANTES de evaluar disparos de la nueva vela
                 self._check_expirations()
                 
-                # Sincronizar balance real periódicamente con IQ Option cada 4s
-                if not self.config.use_simulator and self.iq and int(now_ts) % 4 == 0:
+                # 2. Sincronizar balance real periódicamente con IQ Option (fuera de la ventana de disparo para cero latencia)
+                if not is_trigger_window and not self.config.use_simulator and self.iq and int(now_ts) % 6 == 0:
                     self._sync_iq_balance()
 
-                # Rotación y vigilancia continua de cartera autónoma cada 45s (8 a 12 mejores pares)
-                if not self.config.use_simulator and self.iq and int(now_ts) % 45 == 0:
-                    self._auto_discover_top_assets(min_count=8, max_count=12, silent=True)
+                # 3. Rotación y calibración progresiva de cartera cada 60s (en el segundo 25, lejos del cierre de vela)
+                if not self.config.use_simulator and self.iq and second_of_1m == 25:
+                    self._auto_discover_top_assets(min_count=12, max_count=16, silent=True)
                 
-                # ESCANEO CONTINUO DE LOS ACTIVOS AUTÓNOMAMENTE ASIGNADOS
+                # 4. ESCANEO ULTRA-RÁPIDO DE LOS ACTIVOS CALIBRADOS WALK-FORWARD
                 qualified_candidates = []
+                g1_active = self.portfolio_recovery.get("active", False)
+                ui_lvl = 1 if g1_active else 0
+                ui_amt = float(self.portfolio_recovery.get("amount", self.config.amount)) if g1_active else float(self.config.amount)
+                user_thresh = float(self.config.min_probability)
+
                 for asset in list(self.config.assets):
                     if not self.is_running:
                         break
 
-                    # 1. Verificar si el activo está abierto en IQ Option y resolver su símbolo real
                     target_asset, asset_payout = self._resolve_target_asset(asset)
                     is_open = (target_asset is not None)
-
-                    m_info = self.martingale_state.get(asset, {"current_level": 0, "next_amount": self.config.amount, "immediate_reentry": False})
-                    curr_lvl = m_info.get("current_level", 0)
-                    next_amt = m_info.get("next_amount", self.config.amount)
-                    immediate_reentry = m_info.get("immediate_reentry", False)
-                    user_thresh = float(self.config.min_probability)
 
                     if not is_open:
                         self.assets_signals[asset] = {
@@ -936,44 +969,28 @@ class TradingEngine:
                             "macro_bias": "Mercado cerrado en binarias",
                             "regime": "MERCADO CERRADO",
                             "phase_label": phase_label,
-                            "martingale_level": curr_lvl,
-                            "next_amount": next_amt,
+                            "martingale_level": ui_lvl,
+                            "next_amount": ui_amt,
                             "adaptive_threshold": user_thresh,
                             "is_pullback": False,
                             "payout": 0.0,
-                            "confluence_text": "⏸️ Activo cerrado en opciones binarias en este horario",
+                            "confluence_text": "⏸️ Activo cerrado o suspendido en este horario",
                             "votes": {},
                             "updated_at": time.strftime("%H:%M:%S")
                         }
                         continue
                         
                     df_5m = self._fetch_asset_candles(target_asset, count=80, timeframe_sec=300)
-                    df_1m = self._fetch_asset_candles(target_asset, count=80, timeframe_sec=60)
+                    df_1m = self._fetch_asset_candles(target_asset, count=90, timeframe_sec=60)
                     
-                    eval_mtf = self.ensemble.evaluate_mtf(df_5m, df_1m)
-                    curr_price = eval_mtf["snapshot"]["close"]
+                    eval_mtf = self.ensemble.evaluate_mtf(df_5m, df_1m, asset=target_asset)
+                    curr_price = self.current_prices.get(target_asset, eval_mtf["snapshot"]["close"])
                     self.current_prices[asset] = curr_price
                     
                     action = eval_mtf["dominant_action"]
                     prob = eval_mtf["dominant_probability"]
                     macro_bias = eval_mtf["macro_bias"]
-                    
-                    # Nivel actual de Martingala e importe para la UI
-                    m_info = self.martingale_state.get(asset, {"current_level": 0, "next_amount": self.config.amount, "immediate_reentry": False})
-                    curr_lvl = m_info.get("current_level", 0)
-                    next_amt = m_info.get("next_amount", self.config.amount)
-                    immediate_reentry = m_info.get("immediate_reentry", False)
-
-                    # UMBRAL DE DISPARO ESTRICTO DEFINIDO POR EL USUARIO:
-                    # El bot respeta 100% el valor fijado por el usuario en el panel
-                    user_thresh = float(self.config.min_probability)
-
-                    # Payout actual
-                    asset_payout = self._get_asset_payout(asset)
-
-                    # Gatillo Sniper Pullback a mitad de vela (segundo 12 a 42)
-                    is_pullback_cand = eval_mtf.get("is_pullback", False) and self.config.use_sniper_pullback
-                    is_pullback_window = (12 <= second_of_1m <= 42) and is_pullback_cand
+                    is_pullback_cand = eval_mtf.get("is_pullback", False)
 
                     self.assets_signals[asset] = {
                         "asset": asset,
@@ -985,8 +1002,8 @@ class TradingEngine:
                         "macro_bias": f"Macro 5M: {macro_bias}",
                         "regime": eval_mtf["regime_5m"],
                         "phase_label": phase_label,
-                        "martingale_level": curr_lvl,
-                        "next_amount": next_amt,
+                        "martingale_level": ui_lvl,
+                        "next_amount": ui_amt,
                         "adaptive_threshold": user_thresh,
                         "is_pullback": is_pullback_cand,
                         "payout": asset_payout,
@@ -995,65 +1012,45 @@ class TradingEngine:
                         "updated_at": time.strftime("%H:%M:%S")
                     }
 
-                    # Recolectar candidatos calificados que cumplan umbral estricto y no estén en rango
+                    # Recolectar candidatos con señal Walk-Forward validada en la vela cerrada actual
                     last_candle = self.last_trade_candles.get(asset, -1)
-                    if action in ["CALL", "PUT"] and prob >= user_thresh and macro_bias != "RANGO" and current_candle_1m_id != last_candle:
+                    if action in ["CALL", "PUT"] and prob >= user_thresh and closed_candle_id != last_candle:
                         qualified_candidates.append({
                             "asset": asset,
                             "action": action,
                             "prob": prob,
+                            "score": eval_mtf.get("selected_score", prob),
                             "eval_mtf": eval_mtf,
-                            "is_martingale": immediate_reentry,
                             "reason": eval_mtf["confluence_text"]
                         })
 
-                # DISPARO CUANTITATIVO DE ALTA PRECISIÓN AL CIERRE DE VELA CONFIRMADA (Segundos 58-59 o 00):
-                # Elimina cualquier ruido intra-vela y garantiza que la expiración cubra la siguiente vela completa de 1M
-                if is_trigger_window and qualified_candidates:
-                    qualified_candidates.sort(key=lambda x: (1 if x["is_martingale"] else 0, x["prob"]), reverse=True)
+                # 5. DISPARO CUANTITATIVO WALK-FORWARD AL CIERRE DE VELA CONFIRMADA (Seg 59 o Segs 00..05):
+                if (
+                    is_trigger_window
+                    and qualified_candidates
+                    and len(self.active_trades) == 0
+                    and self.last_global_trade_candle != closed_candle_id
+                ):
+                    qualified_candidates.sort(key=lambda x: (x["score"], x["prob"]), reverse=True)
+                    cand = qualified_candidates[0]
+                    c_asset = cand["asset"]
+                    c_action = cand["action"]
+                    top_eval = cand["eval_mtf"]
+                    lvl_prefix = "⚡ [RECUPERACIÓN G1 WF] " if g1_active else "🎯 [ENTRADA G0 WF] "
+                    top_reason = f"{lvl_prefix}{cand['reason']}"
                     
-                    used_currencies = set()
-                    executed_in_candle = 0
-                    max_concurrent_per_candle = 1  # 1 orden quirúrgica por cierre para evitar sobreexposición
-                    
-                    for cand in qualified_candidates:
-                        if executed_in_candle >= max_concurrent_per_candle:
-                            break
-                        if len(self.active_trades) >= 1:  # MÁXIMA PRECISIÓN: Solo 1 operación activa a la vez en todo el bot
-                            break
-                            
-                        c_asset = cand["asset"]
-                        c_action = cand["action"]
-                        last_c = self.last_trade_candles.get(c_asset, -1)
-                        if (current_candle_1m_id - last_c) < 2:  # Cooldown de al menos 2 velas para refrescar el ciclo de liquidez
-                            continue
-                            
-                        # FILTRO DE DESCORRELACIÓN INSTITUCIONAL:
-                        base_sym = c_asset.replace("-op", "").replace("-OTC", "")
-                        curr_pair = (base_sym[:3], base_sym[3:6]) if len(base_sym) == 6 else (base_sym, "")
-                        
-                        # Si alguna de las divisas del par ya está activa, evitar correlación directa
-                        if curr_pair[0] in used_currencies or (curr_pair[1] and curr_pair[1] in used_currencies):
-                            continue
-                            
-                        top_eval = cand["eval_mtf"]
-                        top_reason = f"🎯 [CIERRE VELA CONFIRMADO | SEG {second_of_1m}] {cand['reason']} (Prob: {cand['prob']:.1f}% &ge; Umbral: {user_thresh:.0f}%)"
-                        
-                        executed = self._execute_order(
-                            asset=c_asset,
-                            action=c_action,
-                            probability=cand["prob"],
-                            votes=top_eval["votes"],
-                            snapshot=top_eval["snapshot"],
-                            macro_info=top_reason
-                        )
-                        if executed:
-                            executed_in_candle += 1
-                            self.last_trade_candles[c_asset] = current_candle_1m_id
-                            used_currencies.add(curr_pair[0])
-                            if curr_pair[1]:
-                                used_currencies.add(curr_pair[1])
-                            print(f">> 🎯 [ORDEN DE ALTA CONVICCIÓN EJECUTADA] {c_action} en {c_asset} | Convicción: {cand['prob']:.1f}%\n")
+                    executed = self._execute_order(
+                        asset=c_asset,
+                        action=c_action,
+                        probability=cand["prob"],
+                        votes=top_eval["votes"],
+                        snapshot=top_eval["snapshot"],
+                        macro_info=top_reason
+                    )
+                    if executed:
+                        self.last_global_trade_candle = closed_candle_id
+                        self.last_trade_candles[c_asset] = closed_candle_id
+                        print(f">> 🎯 [ORDEN WALK-FORWARD EJECUTADA] {c_action} en {c_asset} | WR Ciclo Esperado: {cand['prob']:.1f}%\n")
 
                 self.current_state["assets_signals"] = self.assets_signals
                 self.current_state["active_trades"] = list(self.active_trades.values())
@@ -1063,7 +1060,7 @@ class TradingEngine:
                     self.current_state["last_price"] = self.current_prices.get(first_asset, 1.0850)
                     self.current_state["last_signal"] = self.assets_signals.get(first_asset)
                     
-                time.sleep(1) # Pulso continuo de 1 segundo
+                time.sleep(0.5 if is_trigger_window else 1.0)
             except Exception as e:
                 logger.error("Error en bucle MTF: %s", e)
                 time.sleep(2)

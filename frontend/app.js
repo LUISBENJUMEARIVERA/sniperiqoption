@@ -517,6 +517,8 @@ function renderTradesTable(trades) {
       let resBadge = '<span class="badge-pending">⏳ PENDIENTE</span>';
       if (t.result === 'WIN') resBadge = '<span class="badge-win">✅ GANADA</span>';
       if (t.result === 'LOSS') resBadge = '<span class="badge-loss">❌ PERDIDA</span>';
+      if (t.result === 'RECOVERED') resBadge = '<span class="badge-pending" style="color:#38bdf8;border-color:#38bdf8;">♻️ RECUPERADA G1</span>';
+      if (t.result === 'EQUAL') resBadge = '<span class="badge-pending">⚖️ EMPATE</span>';
 
       const profitStr = t.profit !== 0 ? `${t.profit > 0 ? '+' : ''}$${t.profit.toFixed(2)}` : '$0.00';
       const profitClass = t.profit > 0 ? 'text-green' : (t.profit < 0 ? 'text-red' : '');
@@ -881,6 +883,8 @@ function renderHistoricalTradesTable(trades) {
     let resBadge = '<span class="badge-pending">⏳ PENDIENTE</span>';
     if (t.result === 'WIN') resBadge = '<span class="badge-win">✅ GANADA</span>';
     if (t.result === 'LOSS') resBadge = '<span class="badge-loss">❌ PERDIDA</span>';
+    if (t.result === 'RECOVERED') resBadge = '<span class="badge-pending" style="color:#38bdf8;border-color:#38bdf8;">♻️ RECUPERADA G1</span>';
+    if (t.result === 'EQUAL') resBadge = '<span class="badge-pending">⚖️ EMPATE</span>';
 
     const profitStr = t.profit !== 0 ? `${t.profit > 0 ? '+' : ''}$${t.profit.toFixed(2)}` : '$0.00';
     const profitClass = t.profit > 0 ? 'text-green' : (t.profit < 0 ? 'text-red' : '');

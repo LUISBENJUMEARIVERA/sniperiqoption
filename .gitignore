@@ -24,3 +24,4 @@ Thumbs.db
 
 # Historico de velas para backtesting
 data/history/
+data/history_turbo/

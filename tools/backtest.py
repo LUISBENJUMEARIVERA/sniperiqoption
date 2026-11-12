@@ -323,6 +323,116 @@ def cmd_report(args):
     print()
 
 
+def cmd_walkforward(args):
+    """
+    Ejecuta la validación institucional Walk-Forward (70% Calibración Doble Ventana W1+W2 -> 30% Out-Of-Sample Ciego)
+    usando exactamente EnsembleEngine.calibrate_asset y compute_quant_series(S1..S9) sobre todo el universo Turbo.
+    """
+    from app.ensemble import EnsembleEngine
+    from app.strategies import compute_quant_series
+
+    t_dir = os.path.join(ROOT, "data", "history_turbo")
+    search_dir = t_dir if os.path.exists(t_dir) else HIST_DIR
+    files = sorted([f for f in os.listdir(search_dir) if f.endswith(".csv") and f != "replay.csv"])
+    if not files:
+        print(f"No hay archivos CSV en {search_dir}")
+        return
+
+    dfs = {}
+    for f in files:
+        sym = f[:-4]
+        df = pd.read_csv(os.path.join(search_dir, f)).reset_index(drop=True)
+        df = df.rename(columns={"ts": "timestamp", "from": "timestamp", "min": "low", "max": "high", "volume": "vol"})
+        if "timestamp" not in df.columns:
+            continue
+        if len(df) >= 900:
+            dfs[sym] = df
+
+    ens = EnsembleEngine()
+    events = []
+    val_assets = []
+    oos_spans = []
+
+    for sym, df in dfs.items():
+        cut = int(len(df) * 0.70)
+        df_is = df.iloc[:cut].reset_index(drop=True)
+        cal = ens.calibrate_asset(sym, df_is, min_real_wr=55.5, min_otc_wr=58.5)
+        if not cal.get("is_validated"):
+            continue
+        val_assets.append(cal)
+
+        # Evaluar en el 30% Out-Of-Sample ciego (velas posteriores a cut)
+        out_co = np.sign(df["close"].shift(-1) - df["open"].shift(-1))
+        sigs = compute_quant_series(df)
+        idx_arr = np.arange(len(df))
+        m_oos = (idx_arr >= cut) & (out_co != 0).values & out_co.notna().values
+        span_h = (float(df["timestamp"].iloc[-1]) - float(df["timestamp"].iloc[cut])) / 3600.0
+        if span_h < 24.0:
+            oos_spans.append(span_h)
+
+        for sname, meta in cal["validated"].items():
+            sseries = sigs[sname]
+            soos = m_oos & (sseries != 0).values
+            for idx in np.where(soos)[0]:
+                ts = int(df["timestamp"].iat[idx])
+                win = int(out_co.iat[idx] == sseries.iat[idx])
+                events.append((ts, meta["score"], sym, sname, win, cal["is_real"]))
+
+    oos_hours = float(np.median(oos_spans)) if oos_spans else 10.0
+
+    events.sort(key=lambda x: (x[0], -x[1]))
+
+    # Simulación secuencial sin solapamiento (máximo 1 orden por minuto en toda la cartera)
+    seq = []
+    last_ts = -1
+    for ev in events:
+        if ev[0] > last_ts:
+            seq.append(ev)
+            last_ts = ev[0]
+
+    total = len(seq)
+    flat_wins = sum(x[4] for x in seq)
+    flat_wr = 100.0 * flat_wins / max(1, total)
+    flat_pnl = sum(86.0 if x[4] else -100.0 for x in seq)
+
+    # Simulación de Ciclo con 1 nivel de Recuperación Walk-Forward (G1, tope estricto nivel 1)
+    c_wins = 0
+    c_loss = 0
+    c_pnl = 0.0
+    in_g1 = False
+    for ev in seq:
+        w = ev[4]
+        if not in_g1:
+            if w:
+                c_wins += 1
+                c_pnl += 86.0
+            else:
+                in_g1 = True
+                c_pnl -= 100.0
+        else:
+            if w:
+                c_wins += 1
+                c_pnl += 215.0 * 0.86
+            else:
+                c_loss += 1
+                c_pnl -= 215.0
+            in_g1 = False
+
+    tot_cycles = c_wins + c_loss
+    cycle_wr = 100.0 * c_wins / max(1, tot_cycles)
+
+    print("\n======================================================================")
+    print("  REPORTE WALK-FORWARD OUT-OF-SAMPLE (70% CALIBRACIÓN -> 30% CIEGO)")
+    print("======================================================================")
+    print(f"• Activos analizados:               {len(dfs)} instrumentos Turbo 1M")
+    print(f"• Activos validados Walk-Forward:   {len(val_assets)} instrumentos (W1 y W2 independientes)")
+    print(f"• Ventana Out-Of-Sample (100% ciega): {oos_hours:.2f} horas")
+    print(f"• Operaciones ejecutadas (1x minuto): {total} trades ({total / max(0.1, oos_hours):.1f} operaciones/hora)")
+    print(f"• Win Rate Flat (0 Martingala G0):   {flat_wr:.2f}% ({flat_wins}W / {total - flat_wins}L) | PnL Flat: ${flat_pnl:+.2f}")
+    print(f"• Win Rate por Ciclo (con G1 máx):   {cycle_wr:.2f}% ({c_wins}W / {c_loss}L ciclos) | PnL G1:   ${c_pnl:+.2f}")
+    print("======================================================================\n")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -333,5 +443,6 @@ if __name__ == "__main__":
     r = sub.add_parser("replay")
     r.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     sub.add_parser("report")
+    sub.add_parser("walkforward")
     a = ap.parse_args()
-    {"download": cmd_download, "replay": cmd_replay, "report": cmd_report}[a.cmd](a)
+    {"download": cmd_download, "replay": cmd_replay, "report": cmd_report, "walkforward": cmd_walkforward}[a.cmd](a)

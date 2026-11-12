@@ -306,3 +306,94 @@ ALL_STRATEGY_FUNCS = [
     ("Volume Flow Direction", TechnicalStrategies.volume_flow_direction),
     ("ADX Trend Strength", TechnicalStrategies.adx_trend_strength),
 ]
+
+QUANT_STRATEGY_LABELS = {
+    "S1_Connors_RSI2_BB10": "Connors RSI(2) + Bollinger(10) Extremo",
+    "S2_RSI3_BB20_Wick": "RSI(3) + Bollinger(20) + Mecha de Rechazo",
+    "S3_Streak3_RSI7": "Agotamiento Racha >=3 + RSI(7)",
+    "S4_Streak4_Rev": "Reversión Institucional Racha >=4 Velas",
+    "S5_BB_Keltner_Climax": "Doble Canal Bollinger + Keltner Clímax",
+    "S6_Trend_RSI2_Pullback": "Pullback Institucional RSI(2) en Tendencia EMA21/50",
+    "S7_Liquidity_Sweep_Pinbar": "Barrido de Liquidez Pinbar (Mecha >=50%)",
+    "S8_Vol_Spike_Fade": "Clímax de Volatilidad >1.8x ATR + Z-Score",
+    "S9_Stoch5_RSI7_Streak2": "Confluencia Stoch(5) + RSI(7) + Racha",
+}
+
+def compute_quant_series(df: pd.DataFrame) -> Dict[str, pd.Series]:
+    """
+    Calcula de forma vectorizada las 9 micro-estrategias institucionales de
+    Pullback al Valor y Agotamiento Estadístico (sin mirar al futuro).
+    Cada serie devuelve +1 (CALL), -1 (PUT) o 0 (NEUTRAL) en cada vela.
+    """
+    o = df["open"].astype(float)
+    h = df["high"].astype(float)
+    l = df["low"].astype(float)
+    c = df["close"].astype(float)
+
+    rng = (h - l).replace(0.0, np.nan)
+    atr = (h - l).rolling(14).mean() + 1e-12
+    dir_ = np.sign(c - o)
+    body = (c - o).abs() / (rng + 1e-12)
+    uw = (h - np.maximum(o, c)) / (rng + 1e-12)
+    lw = (np.minimum(o, c) - l) / (rng + 1e-12)
+
+    s_vals = dir_.values
+    st = np.zeros(len(df))
+    for i in range(1, len(df)):
+        st[i] = st[i - 1] + 1 if (s_vals[i] == s_vals[i - 1] and s_vals[i] != 0) else (1 if s_vals[i] != 0 else 0)
+    streak = pd.Series(st, index=df.index)
+
+    rsi2 = calc_rsi(c, 2)
+    rsi3 = calc_rsi(c, 3)
+    rsi7 = calc_rsi(c, 7)
+
+    sma10 = c.rolling(10).mean()
+    std10 = c.rolling(10).std() + 1e-12
+    z10 = (c - sma10) / std10
+
+    sma20 = c.rolling(20).mean()
+    std20 = c.rolling(20).std() + 1e-12
+    z20 = (c - sma20) / std20
+
+    ema21 = calc_ema(c, 21)
+    ema50 = calc_ema(c, 50)
+    ema20 = calc_ema(c, 20)
+    kc_up = ema20 + 1.8 * atr
+    kc_dn = ema20 - 1.8 * atr
+
+    ll5 = l.rolling(5).min()
+    hh5 = h.rolling(5).max()
+    stoch5 = 100.0 * (c - ll5) / (hh5 - ll5 + 1e-12)
+
+    hi10 = h.rolling(10).max()
+    lo10 = l.rolling(10).min()
+
+    return {
+        "S1_Connors_RSI2_BB10": pd.Series(
+            np.where((rsi2 >= 92.0) & (z10 >= 1.5), -1,
+            np.where((rsi2 <= 8.0) & (z10 <= -1.5), 1, 0)), index=df.index),
+        "S2_RSI3_BB20_Wick": pd.Series(
+            np.where((rsi3 >= 85.0) & (z20 >= 1.6) & (uw >= 0.25), -1,
+            np.where((rsi3 <= 15.0) & (z20 <= -1.6) & (lw >= 0.25), 1, 0)), index=df.index),
+        "S3_Streak3_RSI7": pd.Series(
+            np.where((streak >= 3) & (dir_ > 0) & (rsi7 >= 68.0), -1,
+            np.where((streak >= 3) & (dir_ < 0) & (rsi7 <= 32.0), 1, 0)), index=df.index),
+        "S4_Streak4_Rev": pd.Series(
+            np.where(streak >= 4, -dir_, 0), index=df.index),
+        "S5_BB_Keltner_Climax": pd.Series(
+            np.where((z20 >= 1.9) & (c >= kc_up) & (rsi7 >= 70.0), -1,
+            np.where((z20 <= -1.9) & (c <= kc_dn) & (rsi7 <= 30.0), 1, 0)), index=df.index),
+        "S6_Trend_RSI2_Pullback": pd.Series(
+            np.where((ema21 > ema50) & (c > ema50) & (rsi2 <= 12.0) & (dir_ < 0), 1,
+            np.where((ema21 < ema50) & (c < ema50) & (rsi2 >= 88.0) & (dir_ > 0), -1, 0)), index=df.index),
+        "S7_Liquidity_Sweep_Pinbar": pd.Series(
+            np.where((h >= hi10) & (uw >= 0.50) & (body <= 0.35), -1,
+            np.where((l <= lo10) & (lw >= 0.50) & (body <= 0.35), 1, 0)), index=df.index),
+        "S8_Vol_Spike_Fade": pd.Series(
+            np.where(((h - l) >= 1.8 * atr) & (dir_ > 0) & (z10 >= 1.5), -1,
+            np.where(((h - l) >= 1.8 * atr) & (dir_ < 0) & (z10 <= -1.5), 1, 0)), index=df.index),
+        "S9_Stoch5_RSI7_Streak2": pd.Series(
+            np.where((stoch5 >= 90.0) & (rsi7 >= 70.0) & (streak >= 2) & (dir_ > 0), -1,
+            np.where((stoch5 <= 10.0) & (rsi7 <= 30.0) & (streak >= 2) & (dir_ < 0), 1, 0)), index=df.index),
+    }
+
