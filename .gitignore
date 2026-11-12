@@ -21,3 +21,6 @@ data/trades.db-journal
 .idea/
 .DS_Store
 Thumbs.db
+
+# Historico de velas para backtesting
+data/history/
