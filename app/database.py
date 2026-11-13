@@ -220,6 +220,24 @@ def mark_trade_recovered(trade_uid: str):
     conn.commit()
     conn.close()
 
+def mark_cycle_step_closed(trade_uid: str):
+    """
+    Marca el paso inicial G0 como 'CYCLE_G0' cuando su reentrada G1 cierra en LOSS,
+    manteniendo su profit negativo intacto (-$100) para que SUM(profit) sea 100% exacto
+    (-$100 - $215 = -$315), pero evitando contar doble pérdida (2 LOSS) por un solo ciclo fallido.
+    """
+    if not trade_uid:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE trades
+    SET result = 'CYCLE_G0'
+    WHERE trade_uid = ? AND result = 'LOSS'
+    """, (trade_uid,))
+    conn.commit()
+    conn.close()
+
 def get_kpi_summary() -> Dict[str, Any]:
     conn = get_connection()
     cursor = conn.cursor()

@@ -20,7 +20,7 @@ from datetime import datetime
 from app.config import BotConfig, DEFAULT_ASSETS
 from app.ensemble import EnsembleEngine
 from app.optimizer import StrategyOptimizer
-from app.database import record_trade, resolve_trade, mark_trade_recovered, get_kpi_summary
+from app.database import record_trade, resolve_trade, mark_trade_recovered, mark_cycle_step_closed, get_kpi_summary
 
 logger = logging.getLogger("AutoTrader.Engine")
 
@@ -283,7 +283,7 @@ class TradingEngine:
 
         return None, 0.0
 
-    def _auto_discover_top_assets(self, min_count: int = 12, max_count: int = 16, silent: bool = False) -> List[str]:
+    def _auto_discover_top_assets(self, min_count: int = 6, max_count: int = 12, silent: bool = False) -> List[str]:
         """
         Radar Cuantitativo Multi-Activo con Calibración Walk-Forward en Vivo:
         1. Refresca el catálogo real Turbo 1M de IQ Option (enabled=True, is_suspended=False).
@@ -330,22 +330,22 @@ class TradingEngine:
             candidates.sort(key=lambda x: (1 if x['is_real'] else 0, x['payout']), reverse=True)
 
             # Calibrar candidatos en doble ventana Walk-Forward (con caché de 15 min para no bloquear el bucle)
-            max_calibrations_this_pass = 36 if not silent else 2
+            max_calibrations_this_pass = 80 if not silent else 4
             calibrations_done = 0
             validated_count = sum(
                 1 for c in candidates
                 if self.ensemble.calibrated_assets.get(c['symbol'], {}).get('is_validated', False)
             )
 
-            for c in candidates[:38]:
+            for c in candidates[:80]:
                 sym = c['symbol']
                 last_cal = self._calibration_cache.get(sym, 0.0)
                 if (now_ts - last_cal) < 900 and sym in self.ensemble.calibrated_assets:
                     continue
                 if calibrations_done >= max_calibrations_this_pass:
                     break
-                # En el arranque inicial, una vez tengamos suficientes activos validados WF, no demorar más
-                if not silent and validated_count >= max_count and calibrations_done >= 16:
+                # En el arranque inicial, una vez tengamos suficientes activos validados WF tras escanear al menos 45, no demorar más
+                if not silent and validated_count >= max_count and calibrations_done >= 45:
                     break
 
                 try:
@@ -373,19 +373,19 @@ class TradingEngine:
                 except Exception:
                     pass
 
-            # Segunda pasada suave (54.0% Real / 56.5% OTC en ambas ventanas) si hay menos de min_count validados
+            # Solo si en todo el catálogo hubiera menos de 4 activos al 55.5%/58.5%, permitir umbral 55.0%/58.0% (jamás diluir a 54%/56.5%)
             current_validated = [
                 c for c in candidates
                 if self.ensemble.calibrated_assets.get(c['symbol'], {}).get('is_validated', False)
             ]
-            if len(current_validated) < min_count:
+            if len(current_validated) < 4:
                 for c in candidates:
                     sym = c['symbol']
                     if self.ensemble.calibrated_assets.get(sym, {}).get('is_validated', False):
                         continue
                     df_closed = self._calibration_df_cache.get(sym)
                     if df_closed is not None:
-                        self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=54.0, min_otc_wr=56.5)
+                        self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=55.0, min_otc_wr=58.0)
 
             # Puntuar y ordenar todos los candidatos priorizando:
             # 1) Validados Walk-Forward en doble ventana (is_validated=True)
@@ -402,9 +402,9 @@ class TradingEngine:
 
             scored_candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
 
-            # Seleccionar preferentemente solo activos validados Walk-Forward (hasta max_count)
+            # Seleccionar EXCLUSIVAMENTE activos validados Walk-Forward (hasta max_count)
             validated_syms = [x[4] for x in scored_candidates if x[0] == 1]
-            if len(validated_syms) >= 6:
+            if len(validated_syms) >= 1:
                 selected = validated_syms[:max_count]
             else:
                 selected = [x[4] for x in scored_candidates[:max_count]]
@@ -869,6 +869,8 @@ class TradingEngine:
                         print(f">> ⚡ [RECUPERACIÓN WALK-FORWARD G1 ARMADA] Operación base #{uid} cerrada en LOSS en {asset}. Próxima señal validada Walk-Forward operará en G1 con ${recov_amount:.2f}...")
                     else:
                         # Límite estricto de seguridad: Jamás pasar de G1
+                        if recovered_uid:
+                            mark_cycle_step_closed(recovered_uid)
                         print(f">> 🛑 [TOPE DE SEGURIDAD G1 APLICADO] Ciclo finalizado en {asset}. Prohibido escalar a G2. Reseteando a importe base ${self.config.amount:.2f}.")
                         self.portfolio_recovery = {
                             "active": False,
@@ -896,7 +898,7 @@ class TradingEngine:
         self._connect_iq()
 
         # Auto-descubrimiento inicial autónomo y calibración Walk-Forward de los mejores activos Turbo 1M
-        self._auto_discover_top_assets(min_count=12, max_count=16, silent=False)
+        self._auto_discover_top_assets(min_count=6, max_count=12, silent=False)
 
         while self.is_running:
             try:
@@ -942,7 +944,7 @@ class TradingEngine:
 
                 # 3. Rotación y calibración progresiva de cartera cada 60s (en el segundo 25, lejos del cierre de vela)
                 if not self.config.use_simulator and self.iq and second_of_1m == 25:
-                    self._auto_discover_top_assets(min_count=12, max_count=16, silent=True)
+                    self._auto_discover_top_assets(min_count=6, max_count=12, silent=True)
                 
                 # 4. ESCANEO ULTRA-RÁPIDO DE LOS ACTIVOS CALIBRADOS WALK-FORWARD
                 qualified_candidates = []

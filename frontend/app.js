@@ -518,6 +518,7 @@ function renderTradesTable(trades) {
       if (t.result === 'WIN') resBadge = '<span class="badge-win">✅ GANADA</span>';
       if (t.result === 'LOSS') resBadge = '<span class="badge-loss">❌ PERDIDA</span>';
       if (t.result === 'RECOVERED') resBadge = '<span class="badge-pending" style="color:#38bdf8;border-color:#38bdf8;">♻️ RECUPERADA G1</span>';
+      if (t.result === 'CYCLE_G0') resBadge = '<span class="badge-pending" style="color:#94a3b8;border-color:#475569;">↪️ PASO G0 (CICLO G1)</span>';
       if (t.result === 'EQUAL') resBadge = '<span class="badge-pending">⚖️ EMPATE</span>';
 
       const profitStr = t.profit !== 0 ? `${t.profit > 0 ? '+' : ''}$${t.profit.toFixed(2)}` : '$0.00';
@@ -884,6 +885,7 @@ function renderHistoricalTradesTable(trades) {
     if (t.result === 'WIN') resBadge = '<span class="badge-win">✅ GANADA</span>';
     if (t.result === 'LOSS') resBadge = '<span class="badge-loss">❌ PERDIDA</span>';
     if (t.result === 'RECOVERED') resBadge = '<span class="badge-pending" style="color:#38bdf8;border-color:#38bdf8;">♻️ RECUPERADA G1</span>';
+    if (t.result === 'CYCLE_G0') resBadge = '<span class="badge-pending" style="color:#94a3b8;border-color:#475569;">↪️ PASO G0 (CICLO G1)</span>';
     if (t.result === 'EQUAL') resBadge = '<span class="badge-pending">⚖️ EMPATE</span>';
 
     const profitStr = t.profit !== 0 ? `${t.profit > 0 ? '+' : ''}$${t.profit.toFixed(2)}` : '$0.00';
