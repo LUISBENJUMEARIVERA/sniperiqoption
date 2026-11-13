@@ -330,7 +330,7 @@ class TradingEngine:
             candidates.sort(key=lambda x: (1 if x['is_real'] else 0, x['payout']), reverse=True)
 
             # Calibrar candidatos en doble ventana Walk-Forward (con caché de 15 min para no bloquear el bucle)
-            max_calibrations_this_pass = 80 if not silent else 4
+            max_calibrations_this_pass = 35 if not silent else 8
             calibrations_done = 0
             validated_count = sum(
                 1 for c in candidates
@@ -344,8 +344,8 @@ class TradingEngine:
                     continue
                 if calibrations_done >= max_calibrations_this_pass:
                     break
-                # En el arranque inicial, una vez tengamos suficientes activos validados WF tras escanear al menos 45, no demorar más
-                if not silent and validated_count >= max_count and calibrations_done >= 45:
+                # En el arranque inicial, una vez tengamos al menos 6 activos validados WF tras escanear 24, iniciar de inmediato
+                if not silent and validated_count >= 6 and calibrations_done >= 24:
                     break
 
                 try:
@@ -942,8 +942,8 @@ class TradingEngine:
                 if not is_trigger_window and not self.config.use_simulator and self.iq and int(now_ts) % 6 == 0:
                     self._sync_iq_balance()
 
-                # 3. Rotación y calibración progresiva de cartera cada 60s (en el segundo 25, lejos del cierre de vela)
-                if not self.config.use_simulator and self.iq and second_of_1m == 25:
+                # 3. Rotación y calibración progresiva de cartera fuera de la ventana de disparo (segs 12, 25 y 38)
+                if not self.config.use_simulator and self.iq and second_of_1m in (12, 25, 38):
                     self._auto_discover_top_assets(min_count=6, max_count=12, silent=True)
                 
                 # 4. ESCANEO ULTRA-RÁPIDO DE LOS ACTIVOS CALIBRADOS WALK-FORWARD

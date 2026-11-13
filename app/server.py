@@ -46,7 +46,7 @@ class StartRequest(BaseModel):
     assets: Optional[List[str]] = None
     asset: str = "EURUSD"
     timeframe_min: int = 1
-    amount: float = 10.0
+    amount: float = 100.0
     min_probability: float = 80.0
     mode: str = "PRACTICE"
     use_simulator: bool = False
@@ -105,6 +105,12 @@ def get_history(start_date: Optional[str] = None, end_date: Optional[str] = None
 
 @app.post("/api/start")
 def start_bot(req: StartRequest):
+    if not req.email or not req.password:
+        saved = load_saved_credentials()
+        if not req.email:
+            req.email = saved.get("email", "")
+        if not req.password:
+            req.password = saved.get("password", "")
     print("\n========================================================")
     print(">> [ORDEN] Solicitud de INICIO recibida desde el navegador.")
     print(f">> [USUARIO] Cuenta: {req.email}")
