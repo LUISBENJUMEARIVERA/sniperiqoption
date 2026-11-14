@@ -17,7 +17,7 @@ import numpy as np
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
-from app.config import BotConfig, DEFAULT_ASSETS
+from app.config import BotConfig, DEFAULT_ASSETS, TOXIC_ASSETS_BLACKLIST
 from app.ensemble import EnsembleEngine
 from app.optimizer import StrategyOptimizer
 from app.database import record_trade, resolve_trade, mark_trade_recovered, mark_cycle_step_closed, get_kpi_summary
@@ -61,6 +61,15 @@ class TradingEngine:
             "lost_trade_uid": None,
             "lost_asset": None
         }
+
+        # Circuit Breakers & Gestión de Riesgo Institucional
+        self.consecutive_cycle_losses: int = 0
+        self.circuit_breaker_until: float = 0.0
+        self.circuit_breaker_reason: str = ""
+        self.asset_cooldowns: Dict[str, float] = {}
+        self.peak_session_balance: Optional[float] = None
+        self.max_trailing_drawdown: float = 450.0
+        self.max_consecutive_cycle_losses: int = 2
         
         self.current_state = {
             "status": "STOPPED",
@@ -250,12 +259,35 @@ class TradingEngine:
         except Exception as e:
             logger.error("Error refrescando catálogo de activos en vivo: %s", e)
 
+    def _is_market_open_toxic_window(self) -> bool:
+        """
+        Ventana de Apertura de Wall Street (09:25 a 10:00 hora local/EST):
+        Durante estos 35 minutos las acciones y ETFs tienen desequilibrios de subasta extremos.
+        """
+        now_lt = time.localtime()
+        return (now_lt.tm_hour == 9 and 25 <= now_lt.tm_min <= 59)
+
+    def _is_equity_or_etf(self, asset: str) -> bool:
+        """Determina si un activo es una acción individual o ETF bursátil."""
+        a = asset.upper().replace("-OTC", "").replace(":N", "").replace("-OP", "")
+        known_stocks_etfs = {
+            "XLK", "SMH", "ASMLA", "AAPL", "MSFT", "NVDA", "AMZN", "GOOG", "META",
+            "TSLA", "AMD", "INTC", "BABA", "BIDU", "NFLX", "DIS", "JNJ", "PFE",
+            "OPENAI", "ANTHROPIC", "LUXURY", "EUROPEAN AI", "JAPANESE AI", "ASML",
+            "FWONA", "HYPE"
+        }
+        return (a in known_stocks_etfs)
+
     def _resolve_target_asset(self, asset: str) -> tuple:
         """
         Mapeo y Redireccionamiento Inteligente en Vivo:
         Prioriza coincidencia exacta en el catálogo Turbo abierto; si no existe,
         busca por símbolo base la variante abierta con mayor payout (excluyendo -op).
+        Descarta tajantemente cualquier activo en la lista negra de activos tóxicos.
         """
+        if asset in TOXIC_ASSETS_BLACKLIST:
+            return None, 0.0
+
         if self.config.use_simulator or not self.iq:
             return asset, 86.0
 
@@ -268,9 +300,12 @@ class TradingEngine:
 
         # 2. Fallback por símbolo base (ej. EURUSD -> EURUSD o EURUSD-OTC)
         base = asset.replace("-op", "").replace("-OTC", "")
+        if base in TOXIC_ASSETS_BLACKLIST:
+            return None, 0.0
+
         candidates = []
         for name, info in self.open_instruments_cache.items():
-            if name.endswith("-op"):
+            if name.endswith("-op") or name in TOXIC_ASSETS_BLACKLIST:
                 continue
             if info.get('base') == base:
                 # Preferir mercado real sobre OTC a igual payout
@@ -287,15 +322,15 @@ class TradingEngine:
         """
         Radar Cuantitativo Multi-Activo con Calibración Walk-Forward en Vivo:
         1. Refresca el catálogo real Turbo 1M de IQ Option (enabled=True, is_suspended=False).
-        2. Prioriza feeds de Mercado Real (futuros CME USNDAQ100:N, USSPX500:N, US2000:N, US30:N,
-           SPX/Gold, XAU/XAG, Forex spot) y pares Turbo de alto Payout (>=80%).
+        2. Prioriza feeds de Mercado Real (futuros CME USNDAQ100:N, USSPX500:N, US2000:N, US30:N, Forex spot)
+           y pares Turbo de alto Payout (>=80%), descartando tajantemente activos tóxicos.
         3. Calibra cada activo en doble ventana histórica independiente (W1 y W2 de 1M) para
            seleccionar únicamente los activos donde las estrategias S1..S9 tienen ventaja
            estadística demostrada (>55.5% Real / >58.5% OTC en ambas mitades, >83% Ciclo G1).
         """
         if self.config.use_simulator or not self.iq:
             default_pool = [
-                "USNDAQ100:N", "USSPX500:N", "US2000:N", "US30:N", "SPX/Gold", "XAU/XAG",
+                "USNDAQ100:N", "USSPX500:N", "US2000:N", "US30:N",
                 "EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "EURJPY-OTC", "EURGBP-OTC", 
                 "USDCHF-OTC", "NZDUSD-OTC", "GBPJPY-OTC", "AUDCAD-OTC", "AUDUSD-OTC"
             ]
@@ -306,12 +341,24 @@ class TradingEngine:
         try:
             self._refresh_live_catalog(force=True)
             now_ts = time.time()
+            in_mkt_open = self._is_market_open_toxic_window()
 
             # Agrupar por par base priorizando versión de Mercado Real y mayor Payout
             base_groups = {}
             for name, info in self.open_instruments_cache.items():
                 if not info.get('is_tradable', False):
                     continue
+                # Filtro 1: Lista negra de activos tóxicos (ratios sintéticos, divisas pegadas, memecoins)
+                base = info.get('base', '')
+                if name in TOXIC_ASSETS_BLACKLIST or base in TOXIC_ASSETS_BLACKLIST:
+                    continue
+                # Filtro 2: Cooldown de activo por ciclo fallido reciente (30 min)
+                if name in self.asset_cooldowns and now_ts < self.asset_cooldowns[name]:
+                    continue
+                # Filtro 3: Escudo de apertura de Wall Street para acciones y ETFs
+                if in_mkt_open and self._is_equity_or_etf(name):
+                    continue
+
                 payout = info.get('payout', 0.0)
                 if payout < self.config.min_payout:
                     continue
@@ -350,14 +397,20 @@ class TradingEngine:
 
                 try:
                     with self._iq_lock:
-                        raw = self.iq.get_candles(sym, 60, 1000, now_ts)
+                        raw1 = self.iq.get_candles(sym, 60, 1000, now_ts)
+                        raw0 = []
+                        if raw1 and len(raw1) >= 500:
+                            first_ts = int(raw1[0]["from"])
+                            raw0 = self.iq.get_candles(sym, 60, 420, first_ts - 60) or []
+                    raw = (raw0 + raw1) if raw0 else raw1
                     if raw and len(raw) >= 260:
                         df_h = pd.DataFrame(raw)
                         df_h.rename(columns={'from': 'timestamp', 'min': 'low', 'max': 'high', 'volume': 'vol'}, inplace=True)
+                        df_h = df_h.drop_duplicates(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
                         # Excluir la vela en formación actual para calibrar solo sobre velas 100% cerradas
                         df_closed = df_h.iloc[:-1].reset_index(drop=True)
                         self._calibration_df_cache[sym] = df_closed
-                        cal_info = self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=55.5, min_otc_wr=58.5)
+                        cal_info = self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=56.5, min_otc_wr=60.0)
                         self._calibration_cache[sym] = now_ts
                         calibrations_done += 1
                         if cal_info.get('is_validated'):
@@ -373,7 +426,7 @@ class TradingEngine:
                 except Exception:
                     pass
 
-            # Solo si en todo el catálogo hubiera menos de 4 activos al 55.5%/58.5%, permitir umbral 55.0%/58.0% (jamás diluir a 54%/56.5%)
+            # Solo si en todo el catálogo hubiera menos de 4 activos al 56.5%/60.0%, permitir umbral 55.5%/59.0%
             current_validated = [
                 c for c in candidates
                 if self.ensemble.calibrated_assets.get(c['symbol'], {}).get('is_validated', False)
@@ -385,7 +438,7 @@ class TradingEngine:
                         continue
                     df_closed = self._calibration_df_cache.get(sym)
                     if df_closed is not None:
-                        self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=55.0, min_otc_wr=58.0)
+                        self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=55.5, min_otc_wr=59.0)
 
             # Puntuar y ordenar todos los candidatos priorizando:
             # 1) Validados Walk-Forward en doble ventana (is_validated=True)
@@ -496,18 +549,18 @@ class TradingEngine:
 
             if timeframe_sec == 300:
                 cached = self._candles_5m_cache.get(target)
-                if cached and (now_ts - cached["time"] < 50):
+                sec_now = int(now_ts) % 60
+                # Durante los primeros 5s del minuto (ventana crítica de disparo), usar siempre caché 5M en RAM para 0ms de latencia
+                if cached and ((now_ts - cached["time"] < 120) or sec_now <= 5):
                     return cached["df"]
             elif timeframe_sec == 60:
-                # Identificar el timestamp exacto de la última vela de 1M CERRADA:
-                # En el segundo 59 la vela actual ya cerró prácticamente; en segundos 00..58 la última cerrada es (minuto_actual - 1)
-                sec_1m = int(now_ts) % 60
+                # Identificar el timestamp exacto de la última vela de 1M 100% CERRADA (curr_min - 1)
                 curr_min = int(now_ts // 60)
-                closed_candle_id = curr_min if sec_1m >= 59 else (curr_min - 1)
+                closed_candle_id = curr_min - 1
                 expected_closed_ts = closed_candle_id * 60
 
                 cached_1m = self._candles_1m_cache.get(target)
-                if cached_1m and cached_1m.get("closed_ts") == expected_closed_ts and (now_ts - cached_1m.get("time", 0) < 35):
+                if cached_1m and cached_1m.get("closed_ts") == expected_closed_ts and (now_ts - cached_1m.get("time", 0) < 45):
                     return cached_1m["df"]
 
             try:
@@ -525,11 +578,10 @@ class TradingEngine:
                         self._candles_5m_cache[target] = {"time": now_ts, "df": df}
                         return df
                     elif timeframe_sec == 60:
-                        sec_1m = int(now_ts) % 60
                         curr_min = int(now_ts // 60)
-                        closed_candle_id = curr_min if sec_1m >= 59 else (curr_min - 1)
+                        closed_candle_id = curr_min - 1
                         expected_closed_ts = closed_candle_id * 60
-                        # CRÍTICO: Excluir la vela recién nacida en formación (segundos 00..58)
+                        # CRÍTICO: Excluir la vela recién nacida en formación
                         # para evaluar SIEMPRE la vela 1M que acaba de cerrar al 100%
                         df_closed = df[df["timestamp"] <= expected_closed_ts].reset_index(drop=True)
                         if len(df_closed) < 30:
@@ -836,6 +888,11 @@ class TradingEngine:
                     self.martingale_state[m_key] = {"current_level": 0, "next_amount": self.config.amount}
 
                 if res == "WIN":
+                    # Restablecer contador de ciclos fallidos consecutivos
+                    self.consecutive_cycle_losses = 0
+                    if self.peak_session_balance is None or self.demo_balance > self.peak_session_balance:
+                        self.peak_session_balance = self.demo_balance
+
                     if current_lvl > 0:
                         if recovered_uid:
                             mark_trade_recovered(recovered_uid)
@@ -853,6 +910,8 @@ class TradingEngine:
 
                 elif res == "LOSS":
                     if self.config.use_martingale and current_lvl == 0:
+                        # Enfriar por 5 minutos el activo donde falló G0 para no insistir en un rompimiento en curso
+                        self.asset_cooldowns[asset] = now + 300
                         # Activar Recuperación Walk-Forward G1 para la próxima señal validada de la cartera
                         mult = max(2.15, float(self.config.martingale_multiplier))
                         recov_amount = round(float(self.config.amount) * mult, 2)
@@ -866,12 +925,33 @@ class TradingEngine:
                         self.martingale_state[m_key]["current_level"] = 1
                         self.martingale_state[m_key]["next_amount"] = recov_amount
                         self.martingale_state[m_key]["immediate_reentry"] = True
-                        print(f">> ⚡ [RECUPERACIÓN WALK-FORWARD G1 ARMADA] Operación base #{uid} cerrada en LOSS en {asset}. Próxima señal validada Walk-Forward operará en G1 con ${recov_amount:.2f}...")
+                        print(f">> ⚡ [RECUPERACIÓN WALK-FORWARD G1 ARMADA] Operación base #{uid} cerrada en LOSS en {asset} (enfriado 5m). Próxima señal validada operará en G1 con ${recov_amount:.2f}...")
                     else:
-                        # Límite estricto de seguridad: Jamás pasar de G1
+                        # Límite estricto de seguridad: Jamás pasar de G1 (Ciclo fallido definitivo)
                         if recovered_uid:
                             mark_cycle_step_closed(recovered_uid)
-                        print(f">> 🛑 [TOPE DE SEGURIDAD G1 APLICADO] Ciclo finalizado en {asset}. Prohibido escalar a G2. Reseteando a importe base ${self.config.amount:.2f}.")
+
+                        # 1. Congelar el activo que falló el ciclo por 30 minutos (evitar repeat losses inmediatas)
+                        self.asset_cooldowns[asset] = now + 1800
+                        print(f">> 🧊 [COOLDOWN DE ACTIVO] {asset} entra en enfriamiento por 30 minutos tras ciclo fallido.")
+
+                        # 2. Incrementar ciclos fallidos consecutivos y evaluar Circuit Breakers
+                        self.consecutive_cycle_losses += 1
+                        print(f">> 🛑 [TOPE DE SEGURIDAD G1 APLICADO] Ciclo finalizado en {asset} ({self.consecutive_cycle_losses} consecutivo/s fallido/s). Reseteando a importe base ${self.config.amount:.2f}.")
+
+                        if self.consecutive_cycle_losses >= self.max_consecutive_cycle_losses:
+                            self.circuit_breaker_until = now + 900  # 15 minutos
+                            self.circuit_breaker_reason = f"{self.consecutive_cycle_losses} ciclos fallidos consecutivos"
+                            print(f">> 🚨 [CIRCUIT BREAKER ACTIVADO] {self.circuit_breaker_reason}. Pausa total de operaciones por 15 minutos para proteger capital.")
+
+                        # 3. Trailing Stop de Preservación de Capital
+                        if self.peak_session_balance is not None:
+                            dd = self.peak_session_balance - self.demo_balance
+                            if dd >= self.max_trailing_drawdown:
+                                self.circuit_breaker_until = max(self.circuit_breaker_until, now + 1800)  # 30 minutos
+                                self.circuit_breaker_reason = f"Drawdown de ${dd:.2f} desde pico (${self.peak_session_balance:.2f})"
+                                print(f">> 🛡️ [ESCUDO TRAILING DRAWDOWN] {self.circuit_breaker_reason}. Pausa de protección por 30 minutos.")
+
                         self.portfolio_recovery = {
                             "active": False,
                             "level": 0,
@@ -904,28 +984,37 @@ class TradingEngine:
             try:
                 now_ts = time.time()
                 
-                # Reloj Micro 1M y alineación estricta a vela 100% cerrada
+                # Reloj Micro 1M y alineación estricta a vela 100% cerrada (curr_min - 1)
                 second_of_1m = int(now_ts) % 60
                 seconds_remaining_1m = 60 - second_of_1m
                 curr_min = int(now_ts // 60)
-                closed_candle_id = curr_min if second_of_1m >= 59 else (curr_min - 1)
+                closed_candle_id = curr_min - 1
                 
-                # Ventana de disparo ampliada (seg 59 de M y segs 00..05 de M+1):
-                # En todos estos segundos la vela M ya cerró y IQ Option asigna exactamente la expiración al cierre de M+1
-                is_trigger_window = (second_of_1m >= 59 or second_of_1m <= 5)
+                # Ventana de disparo exacta al inicio de la nueva vela (segs 00..04 de M+1):
+                # La vela M ya cerró al 100% y entramos al precio de apertura de M+1
+                is_trigger_window = (second_of_1m <= 4)
                 
                 # Reloj Macro 5M (0 a 4)
                 minute_of_5m = (int(now_ts) % 300) // 60
                 is_5m_expansion = (minute_of_5m in [0, 1, 2, 3])
                 phase_label = f"Min {minute_of_5m + 1}/5 (Expansión)" if is_5m_expansion else "Min 5/5 (Agotamiento)"
-                
-                recov_badge = f" | ⚡ G1 ARMADO (${self.portfolio_recovery['amount']:.0f})" if self.portfolio_recovery.get("active") else ""
+
+                # Comprobar si hay un Circuit Breaker o Pausa de Protección activa
+                is_circuit_breaker_active = (now_ts < self.circuit_breaker_until)
+                if is_circuit_breaker_active:
+                    rem_pause = int(self.circuit_breaker_until - now_ts)
+                    recov_badge = f" | 🛡️ PAUSA PROTECCIÓN ({self.circuit_breaker_reason}: {rem_pause}s)"
+                else:
+                    recov_badge = f" | ⚡ G1 ARMADO (${self.portfolio_recovery['amount']:.0f})" if self.portfolio_recovery.get("active") else ""
+
                 timing_status = (
                     f"🔥 DISPARO WALK-FORWARD LISTO (Seg {second_of_1m:02d}/60{recov_badge})"
-                    if is_trigger_window else
-                    f"⏳ Escaneando Cartera WF ({phase_label} &bull; Cierre 1M en {seconds_remaining_1m}s{recov_badge})"
+                    if (is_trigger_window and not is_circuit_breaker_active) else
+                    (f"🛡️ CIRCUIT BREAKER ACTIVO ({self.circuit_breaker_reason} &bull; Reanuda en {int(self.circuit_breaker_until - now_ts)}s)"
+                     if is_circuit_breaker_active else
+                     f"⏳ Escaneando Cartera WF ({phase_label} &bull; Cierre 1M en {seconds_remaining_1m}s{recov_badge})")
                 )
-                
+
                 self.current_state["candle_timing"] = {
                     "second": second_of_1m,
                     "seconds_remaining": seconds_remaining_1m,
@@ -937,7 +1026,7 @@ class TradingEngine:
 
                 # 1. Revisar operaciones cerradas y armar/resetear G1 ANTES de evaluar disparos de la nueva vela
                 self._check_expirations()
-                
+
                 # 2. Sincronizar balance real periódicamente con IQ Option (fuera de la ventana de disparo para cero latencia)
                 if not is_trigger_window and not self.config.use_simulator and self.iq and int(now_ts) % 6 == 0:
                     self._sync_iq_balance()
@@ -945,7 +1034,7 @@ class TradingEngine:
                 # 3. Rotación y calibración progresiva de cartera fuera de la ventana de disparo (segs 12, 25 y 38)
                 if not self.config.use_simulator and self.iq and second_of_1m in (12, 25, 38):
                     self._auto_discover_top_assets(min_count=6, max_count=12, silent=True)
-                
+
                 # 4. ESCANEO ULTRA-RÁPIDO DE LOS ACTIVOS CALIBRADOS WALK-FORWARD
                 qualified_candidates = []
                 g1_active = self.portfolio_recovery.get("active", False)
@@ -956,6 +1045,57 @@ class TradingEngine:
                 for asset in list(self.config.assets):
                     if not self.is_running:
                         break
+
+                    # Filtro A: Excluir activos en lista negra tóxica
+                    if asset in TOXIC_ASSETS_BLACKLIST:
+                        continue
+
+                    # Filtro B: Excluir activo si está en cooldown por pérdida de ciclo (30 min)
+                    if asset in self.asset_cooldowns and now_ts < self.asset_cooldowns[asset]:
+                        rem_cd = int(self.asset_cooldowns[asset] - now_ts)
+                        self.assets_signals[asset] = {
+                            "asset": asset,
+                            "price": self.current_prices.get(asset, 0.0),
+                            "prob_call": 0.0,
+                            "prob_put": 0.0,
+                            "dominant_action": "ENFRIAMIENTO",
+                            "dominant_probability": 0.0,
+                            "macro_bias": "Cooldown por ciclo fallido",
+                            "regime": "PROTECCIÓN DE CAPITAL",
+                            "phase_label": phase_label,
+                            "martingale_level": ui_lvl,
+                            "next_amount": ui_amt,
+                            "adaptive_threshold": user_thresh,
+                            "is_pullback": False,
+                            "payout": 0.0,
+                            "confluence_text": f"🧊 Activo en enfriamiento preventivo ({rem_cd}s restantes)",
+                            "votes": {},
+                            "updated_at": time.strftime("%H:%M:%S")
+                        }
+                        continue
+
+                    # Filtro C: Escudo de apertura de Wall Street para acciones y ETFs
+                    if self._is_market_open_toxic_window() and self._is_equity_or_etf(asset):
+                        self.assets_signals[asset] = {
+                            "asset": asset,
+                            "price": self.current_prices.get(asset, 0.0),
+                            "prob_call": 0.0,
+                            "prob_put": 0.0,
+                            "dominant_action": "VENTANA TOXICA",
+                            "dominant_probability": 0.0,
+                            "macro_bias": "Apertura NY (09:25-10:00)",
+                            "regime": "ALTA VOLATILIDAD",
+                            "phase_label": phase_label,
+                            "martingale_level": ui_lvl,
+                            "next_amount": ui_amt,
+                            "adaptive_threshold": user_thresh,
+                            "is_pullback": False,
+                            "payout": 0.0,
+                            "confluence_text": "🛡️ Escudo Apertura Wall Street: Pausa en acciones/ETFs hasta las 10:00 AM",
+                            "votes": {},
+                            "updated_at": time.strftime("%H:%M:%S")
+                        }
+                        continue
 
                     target_asset, asset_payout = self._resolve_target_asset(asset)
                     is_open = (target_asset is not None)
@@ -1015,8 +1155,9 @@ class TradingEngine:
                     }
 
                     # Recolectar candidatos con señal Walk-Forward validada en la vela cerrada actual
-                    last_candle = self.last_trade_candles.get(asset, -1)
-                    if action in ["CALL", "PUT"] and prob >= user_thresh and closed_candle_id != last_candle:
+                    # Exigir espaciado mínimo de 3 velas (3 minutos) en un mismo activo para jamás operar rachas consecutivas
+                    last_candle = self.last_trade_candles.get(asset, -999)
+                    if action in ["CALL", "PUT"] and prob >= user_thresh and (closed_candle_id - last_candle) >= 3:
                         qualified_candidates.append({
                             "asset": asset,
                             "action": action,
@@ -1026,9 +1167,10 @@ class TradingEngine:
                             "reason": eval_mtf["confluence_text"]
                         })
 
-                # 5. DISPARO CUANTITATIVO WALK-FORWARD AL CIERRE DE VELA CONFIRMADA (Seg 59 o Segs 00..05):
+                # 5. DISPARO CUANTITATIVO WALK-FORWARD AL CIERRE DE VELA CONFIRMADA (Segs 00..04):
                 if (
                     is_trigger_window
+                    and not is_circuit_breaker_active
                     and qualified_candidates
                     and len(self.active_trades) == 0
                     and self.last_global_trade_candle != closed_candle_id

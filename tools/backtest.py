@@ -328,6 +328,7 @@ def cmd_walkforward(args):
     Ejecuta la validación institucional Walk-Forward (70% Calibración Doble Ventana W1+W2 -> 30% Out-Of-Sample Ciego)
     usando exactamente EnsembleEngine.calibrate_asset y compute_quant_series(S1..S9) sobre todo el universo Turbo.
     """
+    from app.config import TOXIC_ASSETS_BLACKLIST
     from app.ensemble import EnsembleEngine
     from app.strategies import compute_quant_series
 
@@ -341,6 +342,8 @@ def cmd_walkforward(args):
     dfs = {}
     for f in files:
         sym = f[:-4]
+        if sym in TOXIC_ASSETS_BLACKLIST or sym.replace("_", "/") in TOXIC_ASSETS_BLACKLIST:
+            continue
         df = pd.read_csv(os.path.join(search_dir, f)).reset_index(drop=True)
         df = df.rename(columns={"ts": "timestamp", "from": "timestamp", "min": "low", "max": "high", "volume": "vol"})
         if "timestamp" not in df.columns:
@@ -356,7 +359,7 @@ def cmd_walkforward(args):
     for sym, df in dfs.items():
         cut = int(len(df) * 0.70)
         df_is = df.iloc[:cut].reset_index(drop=True)
-        cal = ens.calibrate_asset(sym, df_is, min_real_wr=55.5, min_otc_wr=58.5)
+        cal = ens.calibrate_asset(sym, df_is, min_real_wr=56.5, min_otc_wr=60.0)
         if not cal.get("is_validated"):
             continue
         val_assets.append(cal)
@@ -382,13 +385,16 @@ def cmd_walkforward(args):
 
     events.sort(key=lambda x: (x[0], -x[1]))
 
-    # Simulación secuencial sin solapamiento (máximo 1 orden por minuto en toda la cartera)
+    # Simulación secuencial sin solapamiento (máximo 1 orden por minuto y espaciado de 3 min por activo)
     seq = []
     last_ts = -1
+    last_asset_ts = {}
     for ev in events:
-        if ev[0] > last_ts:
+        ts, sc, sym, sname, win, is_r = ev
+        if ts > last_ts and (ts - last_asset_ts.get(sym, -9999)) >= 180:
             seq.append(ev)
-            last_ts = ev[0]
+            last_ts = ts
+            last_asset_ts[sym] = ts
 
     total = len(seq)
     flat_wins = sum(x[4] for x in seq)

@@ -368,32 +368,39 @@ def compute_quant_series(df: pd.DataFrame) -> Dict[str, pd.Series]:
     hi10 = h.rolling(10).max()
     lo10 = l.rolling(10).min()
 
+    # Filtro Institucional de Tendencia (EMA21 vs EMA50) + Ausencia de Mecha Opuesta (<25%):
+    # Prohibido operar en contra de la tendencia estructural 1M o cuando la vela ya dejó rechazo opuesto.
+    ow_lim = 0.25
+    up_trend = (ema21 > ema50) & (uw < ow_lim)
+    dn_trend = (ema21 < ema50) & (lw < ow_lim)
+
     return {
         "S1_Connors_RSI2_BB10": pd.Series(
-            np.where((rsi2 >= 92.0) & (z10 >= 1.5), -1,
-            np.where((rsi2 <= 8.0) & (z10 <= -1.5), 1, 0)), index=df.index),
+            np.where(dn_trend & (rsi2 >= 92.0) & (z10 >= 1.5), -1,
+            np.where(up_trend & (rsi2 <= 8.0) & (z10 <= -1.5), 1, 0)), index=df.index),
         "S2_RSI3_BB20_Wick": pd.Series(
-            np.where((rsi3 >= 85.0) & (z20 >= 1.6) & (uw >= 0.25), -1,
-            np.where((rsi3 <= 15.0) & (z20 <= -1.6) & (lw >= 0.25), 1, 0)), index=df.index),
+            np.where((lw < ow_lim) & (rsi3 >= 85.0) & (z20 >= 1.6) & (uw >= 0.25), -1,
+            np.where((uw < ow_lim) & (rsi3 <= 15.0) & (z20 <= -1.6) & (lw >= 0.25), 1, 0)), index=df.index),
         "S3_Streak3_RSI7": pd.Series(
-            np.where((streak >= 3) & (dir_ > 0) & (rsi7 >= 68.0), -1,
-            np.where((streak >= 3) & (dir_ < 0) & (rsi7 <= 32.0), 1, 0)), index=df.index),
+            np.where(dn_trend & (streak >= 3) & (dir_ > 0) & (rsi7 >= 68.0), -1,
+            np.where(up_trend & (streak >= 3) & (dir_ < 0) & (rsi7 <= 32.0), 1, 0)), index=df.index),
         "S4_Streak4_Rev": pd.Series(
-            np.where(streak >= 4, -dir_, 0), index=df.index),
+            np.where(dn_trend & (streak >= 4) & (dir_ > 0), -1,
+            np.where(up_trend & (streak >= 4) & (dir_ < 0), 1, 0)), index=df.index),
         "S5_BB_Keltner_Climax": pd.Series(
-            np.where((z20 >= 1.9) & (c >= kc_up) & (rsi7 >= 70.0), -1,
-            np.where((z20 <= -1.9) & (c <= kc_dn) & (rsi7 <= 30.0), 1, 0)), index=df.index),
+            np.where(dn_trend & (z20 >= 1.9) & (c >= kc_up) & (rsi7 >= 70.0), -1,
+            np.where(up_trend & (z20 <= -1.9) & (c <= kc_dn) & (rsi7 <= 30.0), 1, 0)), index=df.index),
         "S6_Trend_RSI2_Pullback": pd.Series(
-            np.where((ema21 > ema50) & (c > ema50) & (rsi2 <= 12.0) & (dir_ < 0), 1,
-            np.where((ema21 < ema50) & (c < ema50) & (rsi2 >= 88.0) & (dir_ > 0), -1, 0)), index=df.index),
+            np.where(up_trend & (c > ema50) & (rsi2 <= 12.0) & (dir_ < 0), 1,
+            np.where(dn_trend & (c < ema50) & (rsi2 >= 88.0) & (dir_ > 0), -1, 0)), index=df.index),
         "S7_Liquidity_Sweep_Pinbar": pd.Series(
-            np.where((h >= hi10) & (uw >= 0.50) & (body <= 0.35), -1,
-            np.where((l <= lo10) & (lw >= 0.50) & (body <= 0.35), 1, 0)), index=df.index),
+            np.where((lw < ow_lim) & (h >= hi10) & (uw >= 0.50) & (body <= 0.35), -1,
+            np.where((uw < ow_lim) & (l <= lo10) & (lw >= 0.50) & (body <= 0.35), 1, 0)), index=df.index),
         "S8_Vol_Spike_Fade": pd.Series(
-            np.where(((h - l) >= 1.8 * atr) & (dir_ > 0) & (z10 >= 1.5), -1,
-            np.where(((h - l) >= 1.8 * atr) & (dir_ < 0) & (z10 <= -1.5), 1, 0)), index=df.index),
+            np.where(dn_trend & ((h - l) >= 1.8 * atr) & (dir_ > 0) & (z10 >= 1.5), -1,
+            np.where(up_trend & ((h - l) >= 1.8 * atr) & (dir_ < 0) & (z10 <= -1.5), 1, 0)), index=df.index),
         "S9_Stoch5_RSI7_Streak2": pd.Series(
-            np.where((stoch5 >= 90.0) & (rsi7 >= 70.0) & (streak >= 2) & (dir_ > 0), -1,
-            np.where((stoch5 <= 10.0) & (rsi7 <= 30.0) & (streak >= 2) & (dir_ < 0), 1, 0)), index=df.index),
+            np.where(dn_trend & (stoch5 >= 90.0) & (rsi7 >= 70.0) & (streak >= 2) & (dir_ > 0), -1,
+            np.where(up_trend & (stoch5 <= 10.0) & (rsi7 <= 30.0) & (streak >= 2) & (dir_ < 0), 1, 0)), index=df.index),
     }
 

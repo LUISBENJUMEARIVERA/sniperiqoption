@@ -19,6 +19,19 @@ OTC_ASSETS = [
 CRYPTO_COMMODITY_ASSETS = ["XAUUSD", "BTCUSD"]
 DEFAULT_ASSETS = OTC_ASSETS + FOREX_ASSETS + CRYPTO_COMMODITY_ASSETS
 
+# Lista Negra Estricta de Activos Tóxicos:
+# Excluye divisas de paridad fija/intervenidas, acciones ilíquidas OTC y memecoins con ruido errático
+TOXIC_ASSETS_BLACKLIST = {
+    # Divisas de paridad fija, control cambiario o micro-gaps no modelables
+    "USDAED-OTC", "USDBDT-OTC", "USDVND-OTC", "USDDOP-OTC", "USDARS-OTC",
+    "USDBRL-OTC", "USDMYR-OTC", "USDPHP-OTC", "USDTRY-OTC", "USDCLP-OTC",
+    "USDCOP-OTC", "USDNGN-OTC", "CHFNOK-OTC",
+    # Memecoins, acciones sintéticas OTC y activos sin estructura de reversión limpia
+    "PEPEUSD-OTC", "URANIUM-OTC", "TRUMPUSD-OTC", "WIFUSD-OTC", "BONKUSD-OTC",
+    "ORDIUSD-OTC", "STXUSD-OTC", "SEIUSD-OTC", "ETHUSD-OTC", "SHIBUSD-OTC",
+    "FWONA-OTC", "AIG-OTC", "HYPE-OTC", "OpenAI-OTC", "COFFEE-OTC", "XLK", "ASMLa"
+}
+
 def load_saved_credentials() -> Dict[str, str]:
     if os.path.exists(CREDS_PATH):
         try:

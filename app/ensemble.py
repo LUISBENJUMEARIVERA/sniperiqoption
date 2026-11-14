@@ -43,8 +43,8 @@ class EnsembleEngine:
         self,
         asset: str,
         df_hist: pd.DataFrame,
-        min_real_wr: float = 55.5,
-        min_otc_wr: float = 58.5,
+        min_real_wr: float = 56.5,
+        min_otc_wr: float = 60.0,
     ) -> Dict[str, Any]:
         """
         Calibra empíricamente un activo dividiendo su historial reciente de velas 1M
@@ -79,7 +79,9 @@ class EnsembleEngine:
         valid_out = (out_co != 0) & out_co.notna()
         m_w1 = (idx < mid) & valid_out
         m_w2 = (idx >= mid) & valid_out
-        min_n = max(6, min(12, len(df) // 85))
+        base_min_n = 8 if is_real else 12
+        scale = min(1.0, max(0.65, len(df) / 1400.0))
+        min_n = max(6, int(round(base_min_n * scale)))
 
         validated = {}
         for sname, sseries in sigs.items():
@@ -94,7 +96,7 @@ class EnsembleEngine:
             if w1 >= thr and w2 >= thr:
                 flat_wr = (w1 + w2) / 2.0
                 cycle_wr = (1.0 - (1.0 - flat_wr / 100.0) ** 2) * 100.0
-                score = flat_wr + (4.0 if is_real else 0.0)
+                score = flat_wr + (5.0 if is_real else 0.0)
                 validated[sname] = {
                     "strategy": sname,
                     "label": QUANT_STRATEGY_LABELS.get(sname, sname),
@@ -352,11 +354,29 @@ class EnsembleEngine:
                         }
                         triggered_candidates.append((meta["score"], sig_dir, meta))
 
+        # VETO MACRO 5M CUANTITATIVO:
+        # En tendencia definida en 5M (TENDENCIAL con ADX >= 24 y dirección clara),
+        # se prohíbe operar contra la tendencia (comprar en caída o vender en rally).
+        adx_5m = float(eval_5m.get("adx_val", 20.0))
+        is_strong_trend_5m = (regime_5m == "TENDENCIAL" and adx_5m >= 24.0 and macro_bias in ["CALL", "PUT"])
+
+        filtered_candidates = []
+        for score, sig_dir, meta in triggered_candidates:
+            strat_name = meta.get("strategy", "")
+            cand_action = "CALL" if sig_dir > 0 else "PUT"
+
+            if is_strong_trend_5m:
+                # Prohibir operaciones opuestas a la macro-tendencia 5M fuerte (ADX >= 24)
+                if cand_action != macro_bias:
+                    continue
+
+            filtered_candidates.append((score, sig_dir, meta))
+
         votes = dict(eval_1m["votes"])
 
-        if triggered_candidates:
-            triggered_candidates.sort(key=lambda x: x[0], reverse=True)
-            best_score, best_dir, best_meta = triggered_candidates[0]
+        if filtered_candidates:
+            filtered_candidates.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_dir, best_meta = filtered_candidates[0]
             final_action = "CALL" if best_dir > 0 else "PUT"
             final_prob = round(min(96.0, max(80.5, best_meta["cycle_wr"])), 1)
             flat_wr = best_meta["flat_wr"]
