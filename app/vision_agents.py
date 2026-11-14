@@ -49,8 +49,10 @@ class VisionAgentSwarm:
                 "overhead_wall": 2.0,
                 "net_ob": 0.0,
                 "deceleration": 0.0,
-                "fav_wick": 0.25,
-                "opp_wick": 0.15,
+                "fav_wick": 0.10,
+                "opp_wick": 0.10,
+                "body_rel": -0.60,
+                "ema_spread": 0.50,
                 "channel_r2": 0.0,
                 "grid_10x10": [[0.0] * 10 for _ in range(10)],
             }
@@ -124,7 +126,7 @@ class VisionAgentSwarm:
         opp_wick = float((hw[-1] - max(ow[-1], cw[-1])) / last_rng)
         body_rel = float((cw[-1] - ow[-1]) / last_rng)
 
-        # Regresión lineal sobre las últimas 20 velas
+        # Regresión lineal sobre las últimas 20 velas y Spread EMA21/EMA50 normalizado por ATR14
         c20 = c60[-20:]
         x20 = np.arange(20, dtype=np.float64) - 9.5
         y_dev = c20 - np.mean(c20)
@@ -132,6 +134,16 @@ class VisionAgentSwarm:
         ss_y = float(np.sum(y_dev ** 2)) + 1e-16
         cov_xy = float(np.sum(x20 * y_dev))
         channel_r2 = float((cov_xy ** 2) / (ss_x * ss_y))
+
+        tr60 = np.maximum(h60[1:] - l60[1:], np.maximum(np.abs(h60[1:] - c60[:-1]), np.abs(l60[1:] - c60[:-1])))
+        atr14 = float(np.mean(tr60[-14:])) + 1e-12
+        a21, a50 = 2.0 / 22.0, 2.0 / 51.0
+        e21, e50 = float(c60[0]), float(c60[0])
+        for px in c60[1:]:
+            pf = float(px)
+            e21 = a21 * pf + (1.0 - a21) * e21
+            e50 = a50 * pf + (1.0 - a50) * e50
+        ema_spread = float(abs(e21 - e50) / atr14)
 
         extra = np.array([
             support_floor / 10.0,
@@ -157,6 +169,8 @@ class VisionAgentSwarm:
             "deceleration": round(deceleration, 3),
             "fav_wick": round(fav_wick, 3),
             "opp_wick": round(opp_wick, 3),
+            "body_rel": round(body_rel, 3),
+            "ema_spread": round(ema_spread, 3),
             "channel_r2": round(channel_r2, 3),
             "grid_10x10": grid_10x10,
         }
@@ -260,10 +274,15 @@ class VisionAgentSwarm:
         agent2_approved = (not ob_veto) and (direction != 0)
 
         # --- AGENTE 3: CINEMÁTICA 2D & GEOMETRÍA DE CANAL ---
+        # Forense en vivo: rechazar rebotes prematuros en la vela gatillo (fav_wick > 0.24)
+        # y tendencias sobre-extendidas (ema_spread > 1.45)
         decel = meta["deceleration"]
         r2 = meta["channel_r2"]
-        kin_score = round(min(95.0, max(40.0, 64.0 + decel * 18.0 + fav_wick * 28.0 + r2 * 12.0)), 1)
-        agent3_approved = (opp_wick <= 0.22) and (fav_wick >= 0.15 or decel >= -0.35) and (direction != 0)
+        body_rel = meta.get("body_rel", -0.5)
+        ema_spread = meta.get("ema_spread", 0.5)
+        kin_veto = (fav_wick > 0.24) or (opp_wick > 0.20) or (ema_spread > 1.45)
+        kin_score = round(min(96.0, max(35.0, 74.0 - fav_wick * 35.0 - opp_wick * 45.0 + max(0.0, -body_rel) * 14.0 + r2 * 10.0)), 1)
+        agent3_approved = (not kin_veto) and (body_rel <= -0.38) and (direction != 0)
 
         # --- AGENTE 4: AUDITOR WALK-FORWARD (W1 + W2) ---
         if wf_meta is not None:
@@ -280,10 +299,12 @@ class VisionAgentSwarm:
         is_approved = (
             direction != 0
             and not ob_veto
+            and not kin_veto
             and agent1_approved
             and agent2_approved
+            and agent3_approved
             and agent4_approved
-            and agents_agreed >= 3
+            and agents_agreed == 4
         )
 
         if is_approved:

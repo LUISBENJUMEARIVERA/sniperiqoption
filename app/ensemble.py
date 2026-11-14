@@ -342,7 +342,7 @@ class EnsembleEngine:
                 # Priorizar los 5 patrones de Visión 2D y estructura con mayor estabilidad fuera de muestra
                 universal_defaults = {
                     "CV1_Parabolic_Exhaustion": {"flat_wr": 68.5, "cycle_wr": 90.1, "w1": 68.0, "w2": 69.0},
-                    "S2_RSI3_BB20_Wick": {"flat_wr": 64.0, "cycle_wr": 87.0, "w1": 63.5, "w2": 64.5},
+                    "S3_Streak3_RSI7": {"flat_wr": 65.0, "cycle_wr": 87.8, "w1": 64.5, "w2": 65.5},
                     "CV2_Regression_Channel_Rail": {"flat_wr": 62.5, "cycle_wr": 85.9, "w1": 62.0, "w2": 63.0},
                     "S6_Trend_RSI2_Pullback": {"flat_wr": 61.5, "cycle_wr": 85.2, "w1": 61.0, "w2": 62.0},
                     "S5_BB_Keltner_Climax": {"flat_wr": 61.0, "cycle_wr": 84.8, "w1": 60.5, "w2": 61.5},

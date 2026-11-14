@@ -29,16 +29,18 @@ INSTITUTIONAL_OTC_WHITELIST = {
     "EURJPY-OTC", "GBPJPY-OTC", "EURGBP-OTC", "AUDCHF-OTC", "CADCHF-OTC", "CADJPY-OTC", "CHFJPY-OTC",
     "EURCHF-OTC", "EURCAD-OTC", "EURAUD-OTC", "EURNZD-OTC", "GBPCHF-OTC", "GBPCAD-OTC", "GBPAUD-OTC",
     "GBPNZD-OTC", "AUDCAD-OTC", "AUDJPY-OTC", "AUDNZD-OTC", "NZDCAD-OTC", "NZDCHF-OTC", "NZDJPY-OTC",
-    # Índices Bursátiles Globales Mayores OTC (sin ratios sintéticos compuestos)
-    "US30-OTC", "USNDAQ100-OTC", "SP500-OTC", "US2000-OTC", "EU50-OTC", "GER30-OTC", "UK100-OTC",
+    # Índices Bursátiles Europeos/Asiáticos de Rango OTC (excluidos US30/USNDAQ100/SP500/US2000 por 12.5% WR en vivo)
+    "EU50-OTC", "GER30-OTC", "UK100-OTC",
     "FR40-OTC", "JP225-OTC", "AUS200-OTC", "HK33-OTC",
-    # Metales Mayores y Pares Verificados Walk-Forward
-    "XAUUSD-OTC", "USDBOB-OTC"
+    # Pares Verificados Walk-Forward
+    "USDBOB-OTC"
 }
 
 # Lista Negra Estricta de Activos Tóxicos:
-# Excluye divisas de paridad fija/intervenidas, acciones ilíquidas OTC y memecoins con ruido errático
+# Excluye índices momentum US OTC, oro OTC, divisas de paridad fija/intervenidas, acciones ilíquidas OTC y memecoins
 TOXIC_ASSETS_BLACKLIST = {
+    # Índices Momentum US OTC y Oro OTC (1W/7L = 12.5% WR forense en velas 1M)
+    "US30-OTC", "USNDAQ100-OTC", "SP500-OTC", "US2000-OTC", "XAUUSD-OTC",
     # Ratios sintéticos compuestos de alta distorsión
     "XAU/XAG-OTC", "GER30/UK100-OTC", "SPX/GOLD-OTC", "US100/JP225-OTC", "US500/JP225-OTC", "US30/JP225-OTC",
     # Divisas de paridad fija, control cambiario o micro-gaps no modelables
