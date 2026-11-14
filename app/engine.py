@@ -181,7 +181,8 @@ class TradingEngine:
             return
 
         now = time.time()
-        if not force and (now - self.last_catalog_refresh < 45) and self.open_instruments_cache:
+        sec_of_min = int(now) % 60
+        if not force and ((now - self.last_catalog_refresh < 180) or sec_of_min <= 10 or sec_of_min >= 52) and self.open_instruments_cache:
             return
 
         try:
@@ -566,7 +567,7 @@ class TradingEngine:
                 expected_closed_ts = closed_candle_id * 60
 
                 cached_1m = self._candles_1m_cache.get(target)
-                if cached_1m and cached_1m.get("closed_ts") == expected_closed_ts and (now_ts - cached_1m.get("time", 0) < 45):
+                if cached_1m and cached_1m.get("closed_ts") == expected_closed_ts:
                     return cached_1m["df"]
 
             try:
@@ -1174,9 +1175,11 @@ class TradingEngine:
                             "reason": eval_mtf["confluence_text"]
                         })
 
-                # 5. DISPARO CUANTITATIVO WALK-FORWARD AL CIERRE DE VELA CONFIRMADA (Segs 00..04):
+                # 5. DISPARO CUANTITATIVO WALK-FORWARD AL CIERRE DE VELA CONFIRMADA (Segs 00..10):
+                exec_sec = int(time.time()) % 60
+                can_fire_now = (is_trigger_window or exec_sec <= 10)
                 if (
-                    is_trigger_window
+                    can_fire_now
                     and not is_circuit_breaker_active
                     and qualified_candidates
                     and len(self.active_trades) == 0
