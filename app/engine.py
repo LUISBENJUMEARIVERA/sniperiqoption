@@ -345,7 +345,7 @@ class TradingEngine:
             return self.config.assets
 
         try:
-            self._refresh_live_catalog(force=True)
+            self._refresh_live_catalog(force=(not silent))
             now_ts = time.time()
             in_mkt_open = self._is_market_open_toxic_window()
 
@@ -996,9 +996,9 @@ class TradingEngine:
                 curr_min = int(now_ts // 60)
                 closed_candle_id = curr_min - 1
                 
-                # Ventana de disparo exacta al inicio de la nueva vela (segs 00..04 de M+1):
+                # Ventana de disparo exacta al inicio de la nueva vela (segs 00..06 de M+1):
                 # La vela M ya cerró al 100% y entramos al precio de apertura de M+1
-                is_trigger_window = (second_of_1m <= 4)
+                is_trigger_window = (second_of_1m <= 6)
                 
                 # Reloj Macro 5M (0 a 4)
                 minute_of_5m = (int(now_ts) % 300) // 60
@@ -1037,8 +1037,8 @@ class TradingEngine:
                 if not is_trigger_window and not self.config.use_simulator and self.iq and int(now_ts) % 6 == 0:
                     self._sync_iq_balance()
 
-                # 3. Rotación y calibración progresiva de cartera fuera de la ventana de disparo (segs 12, 25 y 38)
-                if not self.config.use_simulator and self.iq and second_of_1m in (12, 25, 38):
+                # 3. Rotación y calibración progresiva de cartera fuera de la ventana de disparo (cada 3 min en seg 25)
+                if not self.config.use_simulator and self.iq and second_of_1m == 25 and (curr_min % 3 == 0):
                     self._auto_discover_top_assets(min_count=6, max_count=12, silent=True)
 
                 # 4. ESCANEO ULTRA-RÁPIDO DE LOS ACTIVOS CALIBRADOS WALK-FORWARD
@@ -1157,6 +1157,7 @@ class TradingEngine:
                         "payout": asset_payout,
                         "confluence_text": eval_mtf["confluence_text"],
                         "votes": eval_mtf["votes"],
+                        "vision_telemetry": eval_mtf.get("vision_telemetry"),
                         "updated_at": time.strftime("%H:%M:%S")
                     }
 
@@ -1184,7 +1185,7 @@ class TradingEngine:
                     # En recuperación G1 ($215), exigir convicción institucional estricta (>= 86.5% WR Ciclo / >= 63.0% Flat WR)
                     # para jamás arriesgar un G1 en señales marginales como 84.3%
                     if g1_active:
-                        qualified_candidates = [x for x in qualified_candidates if x["prob"] >= 86.5]
+                        qualified_candidates = [x for x in qualified_candidates if x["prob"] >= 85.0]
                         if not qualified_candidates:
                             time.sleep(0.5 if is_trigger_window else 1.0)
                             continue
@@ -1194,7 +1195,7 @@ class TradingEngine:
                     c_asset = cand["asset"]
                     c_action = cand["action"]
                     top_eval = cand["eval_mtf"]
-                    lvl_prefix = "⚡ [RECUPERACIÓN G1 WF] " if g1_active else "🎯 [ENTRADA G0 WF] "
+                    lvl_prefix = "⚡ [RECUPERACIÓN G1 IA-VISIÓN] " if g1_active else "🤖 [ENTRADA G0 IA-VISIÓN] "
                     top_reason = f"{lvl_prefix}{cand['reason']}"
                     
                     executed = self._execute_order(
@@ -1208,15 +1209,21 @@ class TradingEngine:
                     if executed:
                         self.last_global_trade_candle = closed_candle_id
                         self.last_trade_candles[c_asset] = closed_candle_id
-                        print(f">> 🎯 [ORDEN WALK-FORWARD EJECUTADA] {c_action} en {c_asset} | WR Ciclo Esperado: {cand['prob']:.1f}%\n")
+                        print(f">> 🤖 [ORDEN MULTI-AGENTE VISIÓN 2D EJECUTADA] {c_action} en {c_asset} | WR Ciclo: {cand['prob']:.1f}%\n")
 
                 self.current_state["assets_signals"] = self.assets_signals
                 self.current_state["active_trades"] = list(self.active_trades.values())
                 self.current_state["active_trades_count"] = len(self.active_trades)
                 if self.config.assets:
-                    first_asset = self.config.assets[0]
-                    self.current_state["last_price"] = self.current_prices.get(first_asset, 1.0850)
-                    self.current_state["last_signal"] = self.assets_signals.get(first_asset)
+                    # Priorizar mostrar en el visor 2D el activo que tenga señal activa o mayor probabilidad
+                    best_sig_asset = self.config.assets[0]
+                    for a_k in self.config.assets:
+                        s_obj = self.assets_signals.get(a_k, {})
+                        if s_obj.get("dominant_action") in ["CALL", "PUT"]:
+                            best_sig_asset = a_k
+                            break
+                    self.current_state["last_price"] = self.current_prices.get(best_sig_asset, 1.0850)
+                    self.current_state["last_signal"] = self.assets_signals.get(best_sig_asset)
                     
                 time.sleep(0.5 if is_trigger_window else 1.0)
             except Exception as e:

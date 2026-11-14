@@ -29,17 +29,18 @@ INSTITUTIONAL_OTC_WHITELIST = {
     "EURJPY-OTC", "GBPJPY-OTC", "EURGBP-OTC", "AUDCHF-OTC", "CADCHF-OTC", "CADJPY-OTC", "CHFJPY-OTC",
     "EURCHF-OTC", "EURCAD-OTC", "EURAUD-OTC", "EURNZD-OTC", "GBPCHF-OTC", "GBPCAD-OTC", "GBPAUD-OTC",
     "GBPNZD-OTC", "AUDCAD-OTC", "AUDJPY-OTC", "AUDNZD-OTC", "NZDCAD-OTC", "NZDCHF-OTC", "NZDJPY-OTC",
-    # Índices Bursátiles Globales Mayores OTC
+    # Índices Bursátiles Globales Mayores OTC (sin ratios sintéticos compuestos)
     "US30-OTC", "USNDAQ100-OTC", "SP500-OTC", "US2000-OTC", "EU50-OTC", "GER30-OTC", "UK100-OTC",
     "FR40-OTC", "JP225-OTC", "AUS200-OTC", "HK33-OTC",
-    "US100/JP225-OTC", "US500/JP225-OTC", "US30/JP225-OTC", "GER30/UK100-OTC",
     # Metales Mayores y Pares Verificados Walk-Forward
-    "XAUUSD-OTC", "XAU/XAG-OTC", "USDBOB-OTC", "COTTON-OTC", "SUGAR-OTC"
+    "XAUUSD-OTC", "USDBOB-OTC"
 }
 
 # Lista Negra Estricta de Activos Tóxicos:
 # Excluye divisas de paridad fija/intervenidas, acciones ilíquidas OTC y memecoins con ruido errático
 TOXIC_ASSETS_BLACKLIST = {
+    # Ratios sintéticos compuestos de alta distorsión
+    "XAU/XAG-OTC", "GER30/UK100-OTC", "SPX/GOLD-OTC", "US100/JP225-OTC", "US500/JP225-OTC", "US30/JP225-OTC",
     # Divisas de paridad fija, control cambiario o micro-gaps no modelables
     "USDAED-OTC", "USDBDT-OTC", "USDVND-OTC", "USDDOP-OTC", "USDARS-OTC",
     "USDBRL-OTC", "USDMYR-OTC", "USDPHP-OTC", "USDTRY-OTC", "USDCLP-OTC",

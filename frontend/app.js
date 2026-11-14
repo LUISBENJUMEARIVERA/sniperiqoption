@@ -104,10 +104,10 @@ function startLocalClock() {
       clockEl.className = isWindow ? "meta-value text-green" : "meta-value highlight-cyan";
     }
 
-    // Actualizar estados de cierre en todas las tarjetas activas en pantalla
+    // Actualizar estados de cierre solo en tarjetas sin telemetría de visión activa
     document.querySelectorAll('[id^="status-"]').forEach(statusEl => {
       const cardEl = statusEl.closest('.card-pair-quant');
-      if (cardEl && !cardEl.classList.contains('triggered')) {
+      if (cardEl && !cardEl.classList.contains('triggered') && !statusEl.dataset.hasVision) {
         statusEl.textContent = `⏳ 5M (${min5m}/5) • Cierre 1M: ${rem1m}s`;
       }
     });
@@ -415,18 +415,18 @@ function updateDashboard(data) {
       } else if (isTriggered) {
         cardEl.classList.add('triggered');
         if (statusEl) {
-          statusEl.innerHTML = item.is_pullback ? '🎯 ¡SNIPER PULLBACK CONFIRMADO!' : '⚡ ¡DISPARO CONFIRMADO!';
+          statusEl.dataset.hasVision = '1';
+          statusEl.innerHTML = item.confluence_text || '🤖 ¡CONSENSO IA & VISIÓN 2D CONFIRMADO!';
           statusEl.className = 'pair-status-text alert-active';
         }
       } else {
         cardEl.classList.remove('triggered');
-        if (statusEl && !statusEl.classList.contains('alert-active')) {
-          if (item.is_pullback) {
-            statusEl.innerHTML = '🎯 Detectando pullback a EMA9...';
-            statusEl.className = 'pair-status-text';
-          } else {
-            statusEl.className = 'pair-status-text';
+        if (statusEl) {
+          if (item.confluence_text) {
+            statusEl.dataset.hasVision = '1';
+            statusEl.textContent = item.confluence_text;
           }
+          statusEl.className = 'pair-status-text';
         }
       }
     }
@@ -445,14 +445,98 @@ function updateDashboard(data) {
     }
   });
 
-  if (engine.last_signal && engine.last_signal.votes) {
-    renderStrategiesLive(engine.last_signal.votes);
+  if (engine.last_signal) {
+    if (engine.last_signal.votes) {
+      renderStrategiesLive(engine.last_signal.votes);
+    }
+    renderVisionSwarmTelemetry(engine.last_signal);
   }
 
   // Actualizar tabla de historial en tiempo real inmediatamente vía WebSocket
   if (data.trades) {
     renderTradesTable(data.trades);
   }
+}
+
+// Renderizar en vivo el Tensor 2D OpenCV y el Enjambre de 5 Agentes IA
+function renderVisionSwarmTelemetry(sig) {
+  if (!sig) return;
+  const vt = sig.vision_telemetry;
+  if (!vt) return;
+
+  const pillEl = document.getElementById('cvTargetAssetPill');
+  if (pillEl && sig.asset) {
+    pillEl.textContent = `👁️ VISIÓN 2D ACTIVA: ${sig.asset}`;
+  }
+
+  const simEl = document.getElementById('cvSimilarityBadge');
+  if (simEl && vt.visual_similarity !== undefined) {
+    simEl.textContent = `Similitud: ${Number(vt.visual_similarity).toFixed(0)}%`;
+  }
+
+  const supEl = document.getElementById('cvSupportFloorVal');
+  if (supEl && vt.support_floor !== undefined) {
+    supEl.textContent = Number(vt.support_floor).toFixed(2);
+  }
+  const wallEl = document.getElementById('cvOverheadWallVal');
+  if (wallEl && vt.overhead_wall !== undefined) {
+    wallEl.textContent = Number(vt.overhead_wall).toFixed(2);
+  }
+
+  // Dibujar el Tensor 2D 10x10 de OpenCV en el Canvas HTML5
+  const canvas = document.getElementById('cvTensorCanvas');
+  if (canvas && Array.isArray(vt.vision_grid) && vt.vision_grid.length > 0) {
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const rows = vt.vision_grid.length;
+    const cols = vt.vision_grid[0].length || 10;
+    const cellW = w / cols;
+    const cellH = h / rows;
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const val = Number(vt.vision_grid[r][c] || 0);
+        if (val > 0.02) {
+          const alpha = Math.min(0.95, Math.max(0.18, Math.abs(val)));
+          ctx.fillStyle = `rgba(16, 185, 129, ${alpha})`;
+        } else if (val < -0.02) {
+          const alpha = Math.min(0.95, Math.max(0.18, Math.abs(val)));
+          ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`;
+        } else {
+          ctx.fillStyle = 'rgba(15, 23, 42, 0.7)';
+        }
+        ctx.fillRect(c * cellW + 1, r * cellH + 1, cellW - 2, cellH - 2);
+      }
+    }
+  }
+
+  const v = vt.verdicts || {};
+  const setAgentCard = (idx, obj, isArbiter = false) => {
+    if (!obj) return;
+    const scEl = document.getElementById(`ag${idx}Score`);
+    const stEl = document.getElementById(`ag${idx}Status`);
+    if (scEl) {
+      if (isArbiter) {
+        scEl.textContent = obj.approved ? `🔥 ${Number(obj.score).toFixed(1)}% (${obj.agents_agreed}/4)` : `⏳ ${obj.agents_agreed || 0}/4 AGENTES`;
+        scEl.style.color = obj.approved ? '#10b981' : '#06b6d4';
+      } else {
+        scEl.textContent = `${Number(obj.score || 50).toFixed(1)}%`;
+        scEl.style.color = obj.approved ? '#10b981' : '#e5e7eb';
+      }
+    }
+    if (stEl && obj.status) {
+      stEl.textContent = obj.status;
+    }
+  };
+
+  setAgentCard(1, v.vision_2d);
+  setAgentCard(2, v.order_blocks);
+  setAgentCard(3, v.kinematics);
+  setAgentCard(4, v.walk_forward);
+  setAgentCard(5, v.arbiter, true);
 }
 
 // Cargar métricas de estrategias

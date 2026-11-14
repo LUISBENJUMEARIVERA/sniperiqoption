@@ -308,43 +308,48 @@ ALL_STRATEGY_FUNCS = [
 ]
 
 QUANT_STRATEGY_LABELS = {
-    "S1_Connors_RSI2_BB10": "Connors RSI(2) + Bollinger(10) Extremo",
-    "S2_RSI3_BB20_Wick": "RSI(3) + Bollinger(20) + Mecha de Rechazo",
-    "S3_Streak3_RSI7": "Agotamiento Racha >=3 + RSI(7)",
+    "CV1_Parabolic_Exhaustion": "Visión 2D: Desaceleración Parabólica + Freno de Cuerpo",
+    "S2_RSI3_BB20_Wick": "Visión 2D: RSI(3) + Bollinger(20) + Mecha de Rechazo",
+    "S3_Streak3_RSI7": "Agotamiento Racha >=3 + RSI(7) en Tendencia",
     "S4_Streak4_Rev": "Reversión Institucional Racha >=4 Velas",
     "S5_BB_Keltner_Climax": "Doble Canal Bollinger + Keltner Clímax",
     "S6_Trend_RSI2_Pullback": "Pullback Institucional RSI(2) en Tendencia EMA21/50",
-    "S7_Liquidity_Sweep_Pinbar": "Barrido de Liquidez Pinbar (Mecha >=50%)",
+    "CV2_Regression_Channel_Rail": "Visión 2D: Rebote en Canal de Regresión Lineal (R²>=0.35)",
     "S8_Vol_Spike_Fade": "Clímax de Volatilidad >1.8x ATR + Z-Score",
     "S9_Stoch5_RSI7_Streak2": "Confluencia Stoch(5) + RSI(7) + Racha",
 }
 
 def compute_quant_series(df: pd.DataFrame) -> Dict[str, pd.Series]:
     """
-    Calcula de forma vectorizada las 9 micro-estrategias institucionales de
-    Pullback al Valor y Agotamiento Estadístico (sin mirar al futuro).
+    Calcula de forma vectorizada los patrones de Visión Computacional 2D (Desaceleración
+    Parabólica y Canal de Regresión R²) y las micro-estrategias institucionales de
+    Pullback al Valor (sin mirar al futuro).
     Cada serie devuelve +1 (CALL), -1 (PUT) o 0 (NEUTRAL) en cada vela.
     """
     o = df["open"].astype(float)
     h = df["high"].astype(float)
     l = df["low"].astype(float)
     c = df["close"].astype(float)
+    n = len(df)
 
     rng = (h - l).replace(0.0, np.nan)
     atr = (h - l).rolling(14).mean() + 1e-12
+    atr14 = calc_atr(df, 14).replace(0, np.nan) + 1e-12
     dir_ = np.sign(c - o)
-    body = (c - o).abs() / (rng + 1e-12)
-    uw = (h - np.maximum(o, c)) / (rng + 1e-12)
-    lw = (np.minimum(o, c) - l) / (rng + 1e-12)
+    raw_body = (c - o).abs()
+    body = raw_body / (rng + 1e-12)
+    uw = ((h - np.maximum(o, c)) / (rng + 1e-12)).fillna(0.0)
+    lw = ((np.minimum(o, c) - l) / (rng + 1e-12)).fillna(0.0)
 
     s_vals = dir_.values
-    st = np.zeros(len(df))
-    for i in range(1, len(df)):
+    st = np.zeros(n)
+    for i in range(1, n):
         st[i] = st[i - 1] + 1 if (s_vals[i] == s_vals[i - 1] and s_vals[i] != 0) else (1 if s_vals[i] != 0 else 0)
     streak = pd.Series(st, index=df.index)
 
     rsi2 = calc_rsi(c, 2)
     rsi3 = calc_rsi(c, 3)
+    rsi5 = calc_rsi(c, 5)
     rsi7 = calc_rsi(c, 7)
 
     sma10 = c.rolling(10).mean()
@@ -365,19 +370,47 @@ def compute_quant_series(df: pd.DataFrame) -> Dict[str, pd.Series]:
     hh5 = h.rolling(5).max()
     stoch5 = 100.0 * (c - ll5) / (hh5 - ll5 + 1e-12)
 
-    hi10 = h.rolling(10).max()
-    lo10 = l.rolling(10).min()
-
     # Filtro Institucional de Tendencia (EMA21 vs EMA50) + Ausencia de Mecha Opuesta (<25%):
-    # Prohibido operar en contra de la tendencia estructural 1M o cuando la vela ya dejó rechazo opuesto.
     ow_lim = 0.25
     up_trend = (ema21 > ema50) & (uw < ow_lim)
     dn_trend = (ema21 < ema50) & (lw < ow_lim)
 
+    # CV1: Desaceleración Parabólica 2D (Estiramiento >=1.5 ATR en 3 velas + freno visual de cuerpo o mecha >=35%)
+    stretch_dn = (c.shift(3) - l) / atr14
+    stretch_up = (h - c.shift(3)) / atr14
+    body_decel = raw_body < (raw_body.shift(1) * 0.85)
+
+    # CV2: Canal de Regresión Lineal 2D sobre 20 velas (pendiente m, bondad R² >= 0.35 y Z residual)
+    W = 20
+    slope_arr = np.zeros(n, dtype=np.float64)
+    r2_arr = np.zeros(n, dtype=np.float64)
+    z_res_arr = np.zeros(n, dtype=np.float64)
+    if n >= W:
+        from numpy.lib.stride_tricks import sliding_window_view
+        c_win = sliding_window_view(c.values, W)
+        x_dev = np.arange(W, dtype=np.float64) - (W - 1) / 2.0
+        ss_x = float(np.sum(x_dev ** 2))
+        y_mean = np.mean(c_win, axis=1, keepdims=True)
+        y_dev = c_win - y_mean
+        ss_y = np.sum(y_dev ** 2, axis=1) + 1e-16
+        cov_xy = np.sum(y_dev * x_dev, axis=1)
+        m_vec = cov_xy / ss_x
+        r2_vec = (cov_xy ** 2) / (ss_x * ss_y)
+        y_hat = y_mean + m_vec[:, None] * x_dev[None, :]
+        res_mat = c_win - y_hat
+        res_std = np.std(res_mat, axis=1) + 1e-12
+        slope_arr[W - 1 :] = m_vec
+        r2_arr[W - 1 :] = r2_vec
+        z_res_arr[W - 1 :] = res_mat[:, -1] / res_std
+
+    slope_s = pd.Series(slope_arr, index=df.index)
+    r2_s = pd.Series(r2_arr, index=df.index)
+    z_res_s = pd.Series(z_res_arr, index=df.index)
+
     return {
-        "S1_Connors_RSI2_BB10": pd.Series(
-            np.where(dn_trend & (rsi2 >= 92.0) & (z10 >= 1.5), -1,
-            np.where(up_trend & (rsi2 <= 8.0) & (z10 <= -1.5), 1, 0)), index=df.index),
+        "CV1_Parabolic_Exhaustion": pd.Series(
+            np.where(dn_trend & (stretch_up >= 1.5) & (body_decel | (uw >= 0.35)) & (rsi5 > 68.0), -1,
+            np.where(up_trend & (stretch_dn >= 1.5) & (body_decel | (lw >= 0.35)) & (rsi5 < 32.0), 1, 0)), index=df.index),
         "S2_RSI3_BB20_Wick": pd.Series(
             np.where((lw < ow_lim) & (rsi3 >= 85.0) & (z20 >= 1.6) & (uw >= 0.25), -1,
             np.where((uw < ow_lim) & (rsi3 <= 15.0) & (z20 <= -1.6) & (lw >= 0.25), 1, 0)), index=df.index),
@@ -393,9 +426,9 @@ def compute_quant_series(df: pd.DataFrame) -> Dict[str, pd.Series]:
         "S6_Trend_RSI2_Pullback": pd.Series(
             np.where(up_trend & (c > ema50) & (rsi2 <= 12.0) & (dir_ < 0), 1,
             np.where(dn_trend & (c < ema50) & (rsi2 >= 88.0) & (dir_ > 0), -1, 0)), index=df.index),
-        "S7_Liquidity_Sweep_Pinbar": pd.Series(
-            np.where((lw < ow_lim) & (h >= hi10) & (uw >= 0.50) & (body <= 0.35), -1,
-            np.where((uw < ow_lim) & (l <= lo10) & (lw >= 0.50) & (body <= 0.35), 1, 0)), index=df.index),
+        "CV2_Regression_Channel_Rail": pd.Series(
+            np.where((slope_s < 0) & (r2_s >= 0.35) & (z_res_s >= 1.35) & (lw < ow_lim) & (rsi2 > 80.0), -1,
+            np.where((slope_s > 0) & (r2_s >= 0.35) & (z_res_s <= -1.35) & (uw < ow_lim) & (rsi2 < 20.0), 1, 0)), index=df.index),
         "S8_Vol_Spike_Fade": pd.Series(
             np.where(dn_trend & ((h - l) >= 1.8 * atr) & (dir_ > 0) & (z10 >= 1.5), -1,
             np.where(up_trend & ((h - l) >= 1.8 * atr) & (dir_ < 0) & (z10 <= -1.5), 1, 0)), index=df.index),

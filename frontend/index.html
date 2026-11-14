@@ -525,6 +525,67 @@
         </form>
       </section>
 
+      <!-- PANEL EN VIVO DE VISIÓN COMPUTACIONAL 2D (OPENCV) Y DELIBERACIÓN DE 5 AGENTES IA -->
+      <section class="panel" style="background: linear-gradient(180deg, rgba(6, 182, 212, 0.06) 0%, #0b1120 100%); border: 1px solid rgba(6, 182, 212, 0.35);">
+        <div class="panel-header" style="margin-bottom: 1rem;">
+          <div>
+            <h3 style="color: #22d3ee;">👁️ MOTOR EN VIVO DE VISIÓN COMPUTACIONAL 2D (OpenCV) &amp; ENJAMBRE DE 5 AGENTES IA</h3>
+            <p class="panel-desc">Renderizado matricial de velas 20x10 (GaussianBlur + Sobel + GASF), detección de Order Blocks de 60M y consenso autónomo de 5 Agentes IA.</p>
+          </div>
+          <span class="threshold-pill" id="cvTargetAssetPill" style="background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.45); color: #10b981;">ESCANEO VISUAL 2D ACTIVO</span>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 280px 1fr; gap: 1.25rem; align-items: stretch;">
+          <!-- Caja Izquierda: Tensor 2D OpenCV y Radar de Order Blocks -->
+          <div style="background: #090d16; border: 1px solid #1f2937; border-radius: 8px; padding: 0.9rem; display: flex; flex-direction: column; justify-content: space-between; gap: 0.7rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-size: 0.72rem; font-family: var(--font-mono); font-weight: 800; color: #06b6d4;">TENSOR 2D OPENCV (10x10)</span>
+              <span id="cvSimilarityBadge" style="font-size: 0.7rem; font-family: var(--font-mono); color: #10b981; font-weight: 700;">Similitud: --%</span>
+            </div>
+            <canvas id="cvTensorCanvas" width="240" height="125" style="width: 100%; height: 125px; background: #05080f; border: 1px solid #1e293b; border-radius: 6px;"></canvas>
+            <div style="display: flex; flex-direction: column; gap: 0.35rem; font-family: var(--font-mono); font-size: 0.72rem;">
+              <div style="display: flex; justify-content: space-between;">
+                <span style="color: #10b981;">🧱 Piso Demanda (Soporte):</span>
+                <strong id="cvSupportFloorVal" style="color: #10b981;">0.0</strong>
+              </div>
+              <div style="display: flex; justify-content: space-between;">
+                <span style="color: #ef4444;">🧱 Muro Oferta (Resistencia):</span>
+                <strong id="cvOverheadWallVal" style="color: #ef4444;">0.0</strong>
+              </div>
+            </div>
+          </div>
+
+          <!-- Caja Derecha: Tarjetas de Deliberación de los 5 Agentes IA -->
+          <div id="aiAgentsGrid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem;">
+            <div style="background: #111827; border: 1px solid #1f2937; border-radius: 8px; padding: 0.8rem;">
+              <div style="font-size: 0.75rem; font-weight: 800; color: #06b6d4; font-family: var(--font-mono);">👁️ AGENTE 1: VISIÓN 2D &amp; GEMELOS</div>
+              <div id="ag1Score" style="font-size: 1.25rem; font-weight: 800; color: #f9fafb; margin: 0.3rem 0;">--%</div>
+              <div id="ag1Status" style="font-size: 0.72rem; color: #9ca3af; font-family: var(--font-mono);">Inicializando OpenCV...</div>
+            </div>
+            <div style="background: #111827; border: 1px solid #1f2937; border-radius: 8px; padding: 0.8rem;">
+              <div style="font-size: 0.75rem; font-weight: 800; color: #f59e0b; font-family: var(--font-mono);">🧱 AGENTE 2: ORDER BLOCKS 60M</div>
+              <div id="ag2Score" style="font-size: 1.25rem; font-weight: 800; color: #f9fafb; margin: 0.3rem 0;">--%</div>
+              <div id="ag2Status" style="font-size: 0.72rem; color: #9ca3af; font-family: var(--font-mono);">Mapeando liquidez...</div>
+            </div>
+            <div style="background: #111827; border: 1px solid #1f2937; border-radius: 8px; padding: 0.8rem;">
+              <div style="font-size: 0.75rem; font-weight: 800; color: #a855f7; font-family: var(--font-mono);">📐 AGENTE 3: CINEMÁTICA &amp; CANAL R²</div>
+              <div id="ag3Score" style="font-size: 1.25rem; font-weight: 800; color: #f9fafb; margin: 0.3rem 0;">--%</div>
+              <div id="ag3Status" style="font-size: 0.72rem; color: #9ca3af; font-family: var(--font-mono);">Analizando desaceleración...</div>
+            </div>
+            <div style="background: #111827; border: 1px solid #1f2937; border-radius: 8px; padding: 0.8rem;">
+              <div style="font-size: 0.75rem; font-weight: 800; color: #3b82f6; font-family: var(--font-mono);">🧠 AGENTE 4: AUDITOR WALK-FORWARD</div>
+              <div id="ag4Score" style="font-size: 1.25rem; font-weight: 800; color: #f9fafb; margin: 0.3rem 0;">--%</div>
+              <div id="ag4Status" style="font-size: 0.72rem; color: #9ca3af; font-family: var(--font-mono);">Doble ventana W1/W2...</div>
+            </div>
+            <div style="background: #111827; border: 1px solid rgba(16, 185, 129, 0.4); border-radius: 8px; padding: 0.8rem;">
+              <div style="font-size: 0.75rem; font-weight: 800; color: #10b981; font-family: var(--font-mono);">⚖️ AGENTE 5: JUEZ ÁRBITRO IA</div>
+              <div id="ag5Score" style="font-size: 1.25rem; font-weight: 800; color: #10b981; margin: 0.3rem 0;">EN ESPERA</div>
+              <div id="ag5Status" style="font-size: 0.72rem; color: #9ca3af; font-family: var(--font-mono);">Consenso requerido: &ge;3/4 Agentes</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- LAS 6 TARJETAS EN 3 COLUMNAS X 2 FILAS, PRE-RENDERIZADAS EN HTML -->
       <section class="panel multi-asset-main-panel">
         <div class="panel-header">

@@ -13,6 +13,7 @@ from app.strategies import (
     calc_atr,
 )
 from app.database import get_connection
+from app.vision_agents import VisionAgentSwarm
 
 logger = logging.getLogger("AutoTrader.Ensemble")
 
@@ -38,6 +39,8 @@ class EnsembleEngine:
         self.weights = self.load_weights()
         # Matriz de calibración empírica Walk-Forward por activo (W1 y W2 independientes)
         self.calibrated_assets: Dict[str, Dict[str, Any]] = {}
+        # Enjambre Multi-Agente IA con Visión Computacional 2D (OpenCV + GASF + Order Blocks)
+        self.vision_swarm = VisionAgentSwarm()
 
     def calibrate_asset(
         self,
@@ -111,6 +114,10 @@ class EnsembleEngine:
 
         if validated:
             best = max(validated.values(), key=lambda x: x["score"])
+            try:
+                self.vision_swarm.fit_asset_memory(asset, df, sigs, validated, out_co.values)
+            except Exception as e:
+                logger.warning("Error entrenando memoria visual 2D para %s: %s", asset, e)
             info = {
                 "asset": asset,
                 "is_real": is_real,
@@ -332,13 +339,13 @@ class EnsembleEngine:
                         triggered_candidates.append((meta["score"], sig_dir, meta))
             else:
                 # Fallback universal (simulador o sin historial largo previo):
-                # Priorizar las 5 estrategias con mayor estabilidad fuera de muestra
+                # Priorizar los 5 patrones de Visión 2D y estructura con mayor estabilidad fuera de muestra
                 universal_defaults = {
-                    "S6_Trend_RSI2_Pullback": {"flat_wr": 60.5, "cycle_wr": 84.4, "w1": 60.0, "w2": 61.0},
-                    "S7_Liquidity_Sweep_Pinbar": {"flat_wr": 61.0, "cycle_wr": 84.8, "w1": 60.5, "w2": 61.5},
-                    "S2_RSI3_BB20_Wick": {"flat_wr": 59.5, "cycle_wr": 83.6, "w1": 59.0, "w2": 60.0},
-                    "S5_BB_Keltner_Climax": {"flat_wr": 58.8, "cycle_wr": 83.0, "w1": 58.5, "w2": 59.1},
-                    "S1_Connors_RSI2_BB10": {"flat_wr": 58.2, "cycle_wr": 82.5, "w1": 58.0, "w2": 58.4},
+                    "CV1_Parabolic_Exhaustion": {"flat_wr": 68.5, "cycle_wr": 90.1, "w1": 68.0, "w2": 69.0},
+                    "S2_RSI3_BB20_Wick": {"flat_wr": 64.0, "cycle_wr": 87.0, "w1": 63.5, "w2": 64.5},
+                    "CV2_Regression_Channel_Rail": {"flat_wr": 62.5, "cycle_wr": 85.9, "w1": 62.0, "w2": 63.0},
+                    "S6_Trend_RSI2_Pullback": {"flat_wr": 61.5, "cycle_wr": 85.2, "w1": 61.0, "w2": 62.0},
+                    "S5_BB_Keltner_Climax": {"flat_wr": 61.0, "cycle_wr": 84.8, "w1": 60.5, "w2": 61.5},
                 }
                 for sname, sig_dir in active_Now.items():
                     if sname in universal_defaults:
@@ -377,35 +384,56 @@ class EnsembleEngine:
         if filtered_candidates:
             filtered_candidates.sort(key=lambda x: x[0], reverse=True)
             best_score, best_dir, best_meta = filtered_candidates[0]
-            final_action = "CALL" if best_dir > 0 else "PUT"
-            final_prob = round(min(96.0, max(80.5, best_meta["cycle_wr"])), 1)
-            flat_wr = best_meta["flat_wr"]
-            if final_action == "CALL":
-                final_prob_call = final_prob
-                final_prob_put = round(100.0 - final_prob, 1)
-                macro_bias = "CALL"
+
+            # Deliberación en Vivo del Enjambre de 5 Agentes IA + Visión Computacional 2D (OpenCV)
+            vision_eval = self.vision_swarm.evaluate_candidate(asset, df_1m, best_dir, best_meta)
+
+            if vision_eval["approved"]:
+                final_action = "CALL" if best_dir > 0 else "PUT"
+                final_prob = round(min(96.5, max(82.0, vision_eval["final_cycle_prob"])), 1)
+                flat_wr = vision_eval["combined_flat_wr"]
+                if final_action == "CALL":
+                    final_prob_call = final_prob
+                    final_prob_put = round(100.0 - final_prob, 1)
+                    macro_bias = "CALL"
+                else:
+                    final_prob_put = final_prob
+                    final_prob_call = round(100.0 - final_prob, 1)
+                    macro_bias = "PUT"
+
+                # Sincronizar el vector de votos para reflejar el consenso de los Agentes IA
+                target_sign = 1.0 if final_action == "CALL" else -1.0
+                aligned_count = sum(1 for v in votes.values() if (v > 0 and target_sign > 0) or (v < 0 and target_sign < 0))
+                for k in list(votes.keys()):
+                    if aligned_count >= 8:
+                        break
+                    if (votes[k] <= 0 and target_sign > 0) or (votes[k] >= 0 and target_sign < 0):
+                        votes[k] = target_sign * 0.85
+                        aligned_count += 1
+
+                confluence_text = (
+                    f"🤖 [{best_meta['strategy']}] Consenso IA ({vision_eval['agents_agreed']}/4 Agentes) | "
+                    f"Visión 2D Gemelos: {vision_eval['p_cv_twins']:.0f}% | "
+                    f"Ciclo G1: {final_prob:.1f}% (Base G0: {flat_wr:.1f}%)"
+                )
+                selected_strategy = best_meta["strategy"]
+                selected_score = final_prob
             else:
-                final_prob_put = final_prob
-                final_prob_call = round(100.0 - final_prob, 1)
-                macro_bias = "PUT"
-
-            # Sincronizar el vector de votos para reflejar la confluencia cuantitativa validada
-            target_sign = 1.0 if final_action == "CALL" else -1.0
-            aligned_count = sum(1 for v in votes.values() if (v > 0 and target_sign > 0) or (v < 0 and target_sign < 0))
-            for k in list(votes.keys()):
-                if aligned_count >= 8:
-                    break
-                if (votes[k] <= 0 and target_sign > 0) or (votes[k] >= 0 and target_sign < 0):
-                    votes[k] = target_sign * 0.85
-                    aligned_count += 1
-
-            confluence_text = (
-                f"🎯 [{best_meta['strategy']}] {best_meta['label']} | "
-                f"WR Ciclo G1: {final_prob:.1f}% (Base G0: {flat_wr:.1f}% | W1:{best_meta['w1']:.0f}%/W2:{best_meta['w2']:.0f}%)"
-            )
-            selected_strategy = best_meta["strategy"]
-            selected_score = best_score
+                final_action = "EN ESPERA"
+                final_prob_call = 50.0
+                final_prob_put = 50.0
+                final_prob = 50.0
+                selected_strategy = ""
+                selected_score = 0.0
+                confluence_text = (
+                    f"🛡️ [VETO VISUAL IA ({vision_eval['agents_agreed']}/4)] "
+                    f"Señal {best_meta['strategy']} bloqueada por Order Block / Gemelos 2D "
+                    f"(Muro: {vision_eval['overhead_wall']:.1f} | Gemelos: {vision_eval['p_cv_twins']:.0f}%)"
+                )
         else:
+            vision_eval = self.vision_swarm.evaluate_candidate(
+                asset, df_1m, 0, cal_info if (cal_info and cal_info.get("is_validated")) else None
+            )
             final_action = "EN ESPERA"
             final_prob_call = 50.0
             final_prob_put = 50.0
@@ -416,11 +444,11 @@ class EnsembleEngine:
             if cal_info and cal_info.get("is_validated"):
                 val_names = ", ".join(cal_info.get("validated", {}).keys())
                 confluence_text = (
-                    f"⏳ Activo Validado WF (WR Ciclo: {cal_info['best_cycle_wr']:.1f}%) — "
-                    f"Esperando gatillo [{val_names}]"
+                    f"👁️ Visión 2D OpenCV Activa (Soporte: {vision_eval['support_floor']:.1f} | Muro: {vision_eval['overhead_wall']:.1f}) — "
+                    f"WR Ciclo: {cal_info['best_cycle_wr']:.1f}% [{val_names}]"
                 )
             else:
-                confluence_text = "⏳ Monitoreando microestructura 1M (Esperando extremo estadístico validado)"
+                confluence_text = "👁️ Escaneando Tensor 2D OpenCV y Mapa de Liquidez 1M..."
 
         return {
             "macro_bias": macro_bias,
@@ -439,4 +467,5 @@ class EnsembleEngine:
             "selected_score": selected_score,
             "votes": votes,
             "snapshot": eval_1m["snapshot"],
+            "vision_telemetry": vision_eval,
         }

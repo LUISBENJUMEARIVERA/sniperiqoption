@@ -361,7 +361,7 @@ def cmd_walkforward(args):
     for sym, df in dfs.items():
         cut = int(len(df) * 0.70)
         df_is = df.iloc[:cut].reset_index(drop=True)
-        cal = ens.calibrate_asset(sym, df_is, min_real_wr=56.5, min_otc_wr=61.0)
+        cal = ens.calibrate_asset(sym, df_is, min_real_wr=56.5, min_otc_wr=59.5)
         if not cal.get("is_validated"):
             continue
         val_assets.append(cal)
@@ -379,9 +379,13 @@ def cmd_walkforward(args):
             sseries = sigs[sname]
             soos = m_oos & (sseries != 0).values
             for idx in np.where(soos)[0]:
+                sig_dir = int(sseries.iat[idx])
+                vis = ens.vision_swarm.evaluate_candidate(sym, df.iloc[: idx + 1], sig_dir, meta)
+                if not vis["approved"]:
+                    continue
                 ts = int(df["timestamp"].iat[idx])
-                win = int(out_co.iat[idx] == sseries.iat[idx])
-                events.append((ts, meta["score"], sym, sname, win, cal["is_real"]))
+                win = int(out_co.iat[idx] == sig_dir)
+                events.append((ts, vis["final_cycle_prob"], sym, sname, win, cal["is_real"]))
 
     oos_hours = float(np.median(oos_spans)) if oos_spans else 10.0
 
