@@ -416,7 +416,7 @@ class TradingEngine:
                         # Excluir la vela en formación actual para calibrar solo sobre velas 100% cerradas
                         df_closed = df_h.iloc[:-1].reset_index(drop=True)
                         self._calibration_df_cache[sym] = df_closed
-                        cal_info = self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=56.5, min_otc_wr=61.0)
+                        cal_info = self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=56.5, min_otc_wr=59.5)
                         self._calibration_cache[sym] = now_ts
                         calibrations_done += 1
                         if cal_info.get('is_validated'):
@@ -432,19 +432,19 @@ class TradingEngine:
                 except Exception:
                     pass
 
-            # Solo si en todo el catálogo Tier-1 hubiera menos de 4 activos al 56.5%/61.0%, permitir umbral 56.0%/60.0%
+            # Si en el catálogo Tier-1 hay menos de 8 activos validados al 59.5%, completar con umbral 58.0%
             current_validated = [
                 c for c in candidates
                 if self.ensemble.calibrated_assets.get(c['symbol'], {}).get('is_validated', False)
             ]
-            if len(current_validated) < 4:
+            if len(current_validated) < 8:
                 for c in candidates:
                     sym = c['symbol']
                     if self.ensemble.calibrated_assets.get(sym, {}).get('is_validated', False):
                         continue
                     df_closed = self._calibration_df_cache.get(sym)
                     if df_closed is not None:
-                        self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=56.0, min_otc_wr=60.0)
+                        self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=56.0, min_otc_wr=58.0)
 
             # Puntuar y ordenar todos los candidatos priorizando:
             # 1) Validados Walk-Forward en doble ventana (is_validated=True)

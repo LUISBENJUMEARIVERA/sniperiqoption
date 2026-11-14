@@ -44,7 +44,7 @@ class EnsembleEngine:
         asset: str,
         df_hist: pd.DataFrame,
         min_real_wr: float = 56.5,
-        min_otc_wr: float = 60.0,
+        min_otc_wr: float = 59.5,
     ) -> Dict[str, Any]:
         """
         Calibra empíricamente un activo dividiendo su historial reciente de velas 1M
@@ -79,7 +79,7 @@ class EnsembleEngine:
         valid_out = (out_co != 0) & out_co.notna()
         m_w1 = (idx < mid) & valid_out
         m_w2 = (idx >= mid) & valid_out
-        base_min_n = 8 if is_real else 12
+        base_min_n = 8 if is_real else 9
         scale = min(1.0, max(0.65, len(df) / 1400.0))
         min_n = max(6, int(round(base_min_n * scale)))
 
