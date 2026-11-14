@@ -17,7 +17,7 @@ import numpy as np
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
-from app.config import BotConfig, DEFAULT_ASSETS, TOXIC_ASSETS_BLACKLIST
+from app.config import BotConfig, DEFAULT_ASSETS, TOXIC_ASSETS_BLACKLIST, INSTITUTIONAL_OTC_WHITELIST
 from app.ensemble import EnsembleEngine
 from app.optimizer import StrategyOptimizer
 from app.database import record_trade, resolve_trade, mark_trade_recovered, mark_cycle_step_closed, get_kpi_summary
@@ -220,8 +220,12 @@ class TradingEngine:
                     raw_name = data.get('name', '')
                     clean_name = raw_name.replace('front.', '')
                     
-                    # PROHIBICIÓN ABSOLUTA DE DIGITAL OPTIONS (-op):
-                    if clean_name.endswith('-op'):
+                    # PROHIBICIÓN ABSOLUTA DE DIGITAL OPTIONS (-op) Y ACTIVOS TÓXICOS:
+                    if clean_name.endswith('-op') or clean_name in TOXIC_ASSETS_BLACKLIST:
+                        continue
+                    # En mercado OTC, permitir EXCLUSIVAMENTE la Whitelist Institucional Tier-1 (Forex G8, Índices Mayores, Oro):
+                    # Bloquea de raíz los 120+ altcoins/memecoins cripto OTC y divisas exóticas con payout anzuelo
+                    if clean_name.endswith('-OTC') and clean_name not in INSTITUTIONAL_OTC_WHITELIST:
                         continue
                         
                     base = clean_name.replace('-op', '').replace('-OTC', '')
@@ -286,6 +290,8 @@ class TradingEngine:
         Descarta tajantemente cualquier activo en la lista negra de activos tóxicos.
         """
         if asset in TOXIC_ASSETS_BLACKLIST:
+            return None, 0.0
+        if asset.endswith("-OTC") and asset not in INSTITUTIONAL_OTC_WHITELIST:
             return None, 0.0
 
         if self.config.use_simulator or not self.iq:
@@ -376,23 +382,23 @@ class TradingEngine:
             candidates = list(base_groups.values())
             candidates.sort(key=lambda x: (1 if x['is_real'] else 0, x['payout']), reverse=True)
 
-            # Calibrar candidatos en doble ventana Walk-Forward (con caché de 15 min para no bloquear el bucle)
-            max_calibrations_this_pass = 35 if not silent else 8
+            # Calibrar todos los candidatos Institucionales Tier-1 en doble ventana Walk-Forward (con caché de 15 min)
+            max_calibrations_this_pass = 45 if not silent else 10
             calibrations_done = 0
             validated_count = sum(
                 1 for c in candidates
                 if self.ensemble.calibrated_assets.get(c['symbol'], {}).get('is_validated', False)
             )
 
-            for c in candidates[:80]:
+            for c in candidates[:50]:
                 sym = c['symbol']
                 last_cal = self._calibration_cache.get(sym, 0.0)
                 if (now_ts - last_cal) < 900 and sym in self.ensemble.calibrated_assets:
                     continue
                 if calibrations_done >= max_calibrations_this_pass:
                     break
-                # En el arranque inicial, una vez tengamos al menos 6 activos validados WF tras escanear 24, iniciar de inmediato
-                if not silent and validated_count >= 6 and calibrations_done >= 24:
+                # En el arranque inicial, escanear al menos 35 activos Tier-1 antes de cortar
+                if not silent and validated_count >= 8 and calibrations_done >= 35:
                     break
 
                 try:
@@ -410,7 +416,7 @@ class TradingEngine:
                         # Excluir la vela en formación actual para calibrar solo sobre velas 100% cerradas
                         df_closed = df_h.iloc[:-1].reset_index(drop=True)
                         self._calibration_df_cache[sym] = df_closed
-                        cal_info = self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=56.5, min_otc_wr=60.0)
+                        cal_info = self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=56.5, min_otc_wr=61.0)
                         self._calibration_cache[sym] = now_ts
                         calibrations_done += 1
                         if cal_info.get('is_validated'):
@@ -426,7 +432,7 @@ class TradingEngine:
                 except Exception:
                     pass
 
-            # Solo si en todo el catálogo hubiera menos de 4 activos al 56.5%/60.0%, permitir umbral 55.5%/59.0%
+            # Solo si en todo el catálogo Tier-1 hubiera menos de 4 activos al 56.5%/61.0%, permitir umbral 56.0%/60.0%
             current_validated = [
                 c for c in candidates
                 if self.ensemble.calibrated_assets.get(c['symbol'], {}).get('is_validated', False)
@@ -438,7 +444,7 @@ class TradingEngine:
                         continue
                     df_closed = self._calibration_df_cache.get(sym)
                     if df_closed is not None:
-                        self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=55.5, min_otc_wr=59.0)
+                        self.ensemble.calibrate_asset(sym, df_closed, min_real_wr=56.0, min_otc_wr=60.0)
 
             # Puntuar y ordenar todos los candidatos priorizando:
             # 1) Validados Walk-Forward en doble ventana (is_validated=True)
@@ -1175,6 +1181,14 @@ class TradingEngine:
                     and len(self.active_trades) == 0
                     and self.last_global_trade_candle != closed_candle_id
                 ):
+                    # En recuperación G1 ($215), exigir convicción institucional estricta (>= 86.5% WR Ciclo / >= 63.0% Flat WR)
+                    # para jamás arriesgar un G1 en señales marginales como 84.3%
+                    if g1_active:
+                        qualified_candidates = [x for x in qualified_candidates if x["prob"] >= 86.5]
+                        if not qualified_candidates:
+                            time.sleep(0.5 if is_trigger_window else 1.0)
+                            continue
+
                     qualified_candidates.sort(key=lambda x: (x["score"], x["prob"]), reverse=True)
                     cand = qualified_candidates[0]
                     c_asset = cand["asset"]

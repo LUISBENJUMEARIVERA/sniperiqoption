@@ -328,7 +328,7 @@ def cmd_walkforward(args):
     Ejecuta la validación institucional Walk-Forward (70% Calibración Doble Ventana W1+W2 -> 30% Out-Of-Sample Ciego)
     usando exactamente EnsembleEngine.calibrate_asset y compute_quant_series(S1..S9) sobre todo el universo Turbo.
     """
-    from app.config import TOXIC_ASSETS_BLACKLIST
+    from app.config import TOXIC_ASSETS_BLACKLIST, INSTITUTIONAL_OTC_WHITELIST
     from app.ensemble import EnsembleEngine
     from app.strategies import compute_quant_series
 
@@ -343,6 +343,8 @@ def cmd_walkforward(args):
     for f in files:
         sym = f[:-4]
         if sym in TOXIC_ASSETS_BLACKLIST or sym.replace("_", "/") in TOXIC_ASSETS_BLACKLIST:
+            continue
+        if sym.endswith("-OTC") and sym not in INSTITUTIONAL_OTC_WHITELIST and sym.replace("_", "/") not in INSTITUTIONAL_OTC_WHITELIST:
             continue
         df = pd.read_csv(os.path.join(search_dir, f)).reset_index(drop=True)
         df = df.rename(columns={"ts": "timestamp", "from": "timestamp", "min": "low", "max": "high", "volume": "vol"})
@@ -359,7 +361,7 @@ def cmd_walkforward(args):
     for sym, df in dfs.items():
         cut = int(len(df) * 0.70)
         df_is = df.iloc[:cut].reset_index(drop=True)
-        cal = ens.calibrate_asset(sym, df_is, min_real_wr=56.5, min_otc_wr=60.0)
+        cal = ens.calibrate_asset(sym, df_is, min_real_wr=56.5, min_otc_wr=61.0)
         if not cal.get("is_validated"):
             continue
         val_assets.append(cal)
